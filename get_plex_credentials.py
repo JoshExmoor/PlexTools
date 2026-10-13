@@ -6,6 +6,7 @@ import subprocess
 import sys
 from getpass import getpass
 
+import requests
 from plexapi.myplex import MyPlexAccount
 from plexapi.server import PlexServer
 from plexapi.exceptions import PlexApiException, Unauthorized
@@ -41,7 +42,7 @@ def get_plex_credentials(url: str, username: str = None, password: str = None) -
         raise Unauthorized(
             f"Authenticated with Plex, but token was rejected by server at {url}."
         ) from exc
-    except PlexApiException as exc:
+    except (PlexApiException, requests.exceptions.RequestException) as exc:
         raise RuntimeError(f"Failed to connect to Plex server at {url}: {exc}") from exc
 
     plex_credentials["token"] = token

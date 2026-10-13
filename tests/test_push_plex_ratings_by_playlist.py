@@ -2,6 +2,7 @@ import json
 from unittest.mock import MagicMock
 
 import pytest
+import requests
 from plexapi.exceptions import BadRequest, NotFound
 
 import push_plex_ratings_by_playlist as push_mod
@@ -366,6 +367,32 @@ def test_main_returns_1_on_playlist_not_found(monkeypatch):
     exit_code = push_mod.main(
         [
             "--playlist", "Nope",
+            "--stars", "5",
+            "--url", "http://localhost:32400",
+            "--username", "joe",
+            "--password", "pw",
+        ]
+    )
+
+    assert exit_code == 1
+
+
+def test_main_returns_1_on_connection_error(monkeypatch):
+    """A plain network failure constructing PlexServer isn't a PlexApiException,
+    but main() should still exit 1 with a clean message instead of a raw traceback."""
+    def fake_plex_server(url, token):
+        raise requests.exceptions.ConnectionError("refused")
+
+    monkeypatch.setattr(
+        push_mod,
+        "get_plex_credentials",
+        lambda url, username, password: {"url": url, "token": "tok"},
+    )
+    monkeypatch.setattr(push_mod, "PlexServer", fake_plex_server)
+
+    exit_code = push_mod.main(
+        [
+            "--playlist", "MyList",
             "--stars", "5",
             "--url", "http://localhost:32400",
             "--username", "joe",

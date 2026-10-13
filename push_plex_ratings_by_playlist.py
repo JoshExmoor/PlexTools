@@ -3,6 +3,7 @@ import json
 import os
 import sys
 
+import requests
 from plexapi.exceptions import BadRequest, NotFound, PlexApiException, Unauthorized
 from plexapi.server import PlexServer
 from tqdm import tqdm
@@ -198,6 +199,7 @@ def main(argv=None) -> int:
         Unauthorized,
         NotFound,
         PlexApiException,
+        requests.exceptions.RequestException,
         RuntimeError,
         FileNotFoundError,
         ValueError,

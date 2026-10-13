@@ -2,6 +2,7 @@ import json
 import platform
 
 import pytest
+import requests
 from plexapi.exceptions import PlexApiException, Unauthorized
 
 import get_plex_credentials as gpc
@@ -87,6 +88,20 @@ def test_get_plex_credentials_wraps_other_server_connection_errors(monkeypatch):
 
     def fake_plex_server(url, token):
         raise PlexApiException("timed out")
+
+    monkeypatch.setattr(gpc, "PlexServer", fake_plex_server)
+
+    with pytest.raises(RuntimeError, match="Failed to connect to Plex server"):
+        gpc.get_plex_credentials("http://localhost:32400", username="joe", password="pw")
+
+
+def test_get_plex_credentials_wraps_connection_error_from_server_validation(monkeypatch):
+    """A plain network failure (e.g. unreachable host) isn't a PlexApiException,
+    but should still be wrapped into a RuntimeError rather than propagating raw."""
+    monkeypatch.setattr(gpc, "MyPlexAccount", lambda u, p: FakeAccount("tok"))
+
+    def fake_plex_server(url, token):
+        raise requests.exceptions.ConnectionError("connection refused")
 
     monkeypatch.setattr(gpc, "PlexServer", fake_plex_server)
 
