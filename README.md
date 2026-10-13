@@ -24,30 +24,46 @@ All example commands below assume you run them with the venv's Python:
 
 Every tool that needs to talk to a Plex server authenticates through **`get_plex_credentials.py`**. New scripts should import and reuse it rather than re-implementing login.
 
-### `get_plex_credentials(url, username=None, password=None) -> dict`
+### `get_plex_credentials(url, username=None, password=None, auto_cache=True, cache_location=None) -> dict`
 
 Logs in to Plex via `plexapi.myplex.MyPlexAccount`, retrieves an auth token, and validates it against the target server at `url`. Returns `{"url": ..., "token": ...}`.
 
-- If `username`/`password` are omitted, you're prompted for them on the console (password input is hidden via `getpass`).
+- **Automatic credential cache (default behavior).** Before prompting for anything, this checks the default cache file (`~/.creds/plex_creds.json`, or `cache_location` if given) for a previously saved token for `url` and validates it against the server. If it's still valid, it's returned immediately — no login, no prompt. If there's no cached entry for `url`, or the server rejects it, this falls through to a normal login and **saves the new token back into the cache** for next time. Pass `auto_cache=False` to disable this entirely (always do a fresh login, never read or write the cache).
+- If `username`/`password` are omitted (and no valid cached token was found), you're prompted for them on the console (password input is hidden via `getpass`).
 - Raises `plexapi.exceptions.Unauthorized` on bad credentials or a rejected token, `RuntimeError` on other connection failures.
 
-### `save_plex_credentials(credentials, location)` / `retrieve_plex_credentials(location)`
+### `save_plex_credentials(credentials, location=None)` / `retrieve_plex_credentials(location=None, url=None)`
 
-Cache a credentials dict to a JSON file, or load one back. `save_plex_credentials` locks the file down to the current user only (`chmod 600` on POSIX, `icacls` on Windows) since the file contains a live auth token.
+The cache file holds credentials for **multiple servers**, keyed by url:
+
+```json
+{
+  "http://server1:32400": { "token": "..." },
+  "http://server2:32400": { "token": "..." }
+}
+```
+
+- `save_plex_credentials` reads any existing cache at `location`, adds or replaces only the entry for `credentials["url"]`, and writes the merged result back — other servers' saved credentials are untouched. `location` defaults to `~/.creds/plex_creds.json`.
+- `retrieve_plex_credentials` returns `{"url": ..., "token": ...}` for one server. Pass `url` to pick a specific server; if omitted, the file must contain exactly one saved server (raises `ValueError` if there's more than one, asking the caller to specify `url`).
+- Credential files are no longer locked down to restrictive permissions — an earlier version did this on Windows via `icacls`, but that made the file inaccessible to the very process that needed to read it back. Treat the cache file like any other file containing a secret: don't commit it, don't share it, but it isn't artificially locked down either.
 
 ### CLI
 
 `get_plex_credentials.py` can also be run directly to fetch (and optionally cache) a token:
 
 ```powershell
-# Interactive login, prints url/token
+# Interactive login; checks/updates the default cache (~/.creds/plex_creds.json) automatically
 .\.venv\Scripts\python.exe get_plex_credentials.py --url http://localhost:32400
 
-# Login and cache the result for reuse by other scripts
+# Force a fresh login, bypassing the automatic cache check/save
+.\.venv\Scripts\python.exe get_plex_credentials.py --url http://localhost:32400 --no-auto-cache
+
+# Also cache the result to a specific file (in addition to the default cache)
 .\.venv\Scripts\python.exe get_plex_credentials.py --url http://localhost:32400 --save-to creds.json
 
-# Skip login entirely using a cached file
+# Skip login entirely using a cached file (single-server file, or combine with --url for multi-server)
 .\.venv\Scripts\python.exe get_plex_credentials.py --credential-file creds.json
+.\.venv\Scripts\python.exe get_plex_credentials.py --credential-file creds.json --url http://server2:32400
 ```
 
 ### Convention for new scripts
@@ -57,11 +73,13 @@ Every script in this project that needs a token follows the same CLI shape, so c
 | Flag | Purpose |
 |---|---|
 | `--url` | Base URL of the Plex server. Required unless `--credential-file` is given. |
-| `--username` / `--password` | Optional; prompted if omitted. |
-| `--credential-file PATH` | Skip live login; load a cached `url`/`token` from this JSON file instead. |
-| `--save-to PATH` | Cache the retrieved credentials to this JSON file for later `--credential-file` use. |
+| `--username` / `--password` | Optional; prompted if omitted and no valid cached token is found. |
+| `--credential-file PATH` | Skip live login; load cached credentials from this JSON file instead. Combine with `--url` to pick one server out of a file with multiple saved servers. |
+| `--save-to PATH` | Also cache the retrieved credentials to this JSON file (in addition to the automatic default cache). |
 
-**Security note:** credential cache files contain a live Plex auth token. Treat them like a password — don't commit them to source control, and prefer `--credential-file` + interactive login over passing `--password` on the command line (it can leak into shell history and process listings).
+Scripts that call `get_plex_credentials()` directly (rather than going through its CLI) get the automatic default-cache check/save for free, since `auto_cache=True` is the default.
+
+**Security note:** credential cache files contain a live Plex auth token. Treat them like a password — don't commit them to source control, and prefer the automatic cache / interactive login over passing `--password` on the command line (it can leak into shell history and process listings).
 
 ## Tools
 
