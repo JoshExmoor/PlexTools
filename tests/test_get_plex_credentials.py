@@ -358,14 +358,14 @@ def test_parse_args_parses_all_options():
             "--url", "http://localhost:32400",
             "--username", "joe",
             "--password", "secret",
-            "--save-to", "out.json",
+            "--save-creds", "out.json",
             "--no-auto-cache",
         ]
     )
     assert args.url == "http://localhost:32400"
     assert args.username == "joe"
     assert args.password == "secret"
-    assert args.save_to == "out.json"
+    assert args.save_creds == "out.json"
     assert args.no_auto_cache is True
 
 
@@ -461,7 +461,7 @@ def test_main_returns_1_on_missing_credential_file(capsys, tmp_path):
     assert "Error" in captured.err
 
 
-def test_main_saves_credentials_when_save_to_given(monkeypatch, tmp_path):
+def test_main_saves_credentials_when_save_creds_given(monkeypatch, tmp_path):
     save_location = tmp_path / "saved.json"
     monkeypatch.setattr(
         gpc,
@@ -474,7 +474,7 @@ def test_main_saves_credentials_when_save_to_given(monkeypatch, tmp_path):
             "--url", "http://localhost:32400",
             "--username", "joe",
             "--password", "pw",
-            "--save-to", str(save_location),
+            "--save-creds", str(save_location),
         ]
     )
 

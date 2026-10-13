@@ -85,7 +85,7 @@ The cache file holds credentials for **multiple servers**, keyed by url:
 .\.venv\Scripts\python.exe get_plex_credentials.py --url http://localhost:32400 --no-auto-cache
 
 # Also cache the result to a specific file (in addition to the default cache)
-.\.venv\Scripts\python.exe get_plex_credentials.py --url http://localhost:32400 --save-to creds.json
+.\.venv\Scripts\python.exe get_plex_credentials.py --url http://localhost:32400 --save-creds creds.json
 
 # Skip login entirely using a cached file (single-server file, or combine with --url for multi-server)
 .\.venv\Scripts\python.exe get_plex_credentials.py --credential-file creds.json
@@ -101,7 +101,7 @@ Every script in this project that needs a token follows the same CLI shape, so c
 | `--url` | Base URL of the Plex server. Required unless `--credential-file` is given. |
 | `--username` / `--password` | Optional; prompted if omitted and no valid cached token is found. |
 | `--credential-file PATH` | Skip live login; load cached credentials from this JSON file instead. Combine with `--url` to pick one server out of a file with multiple saved servers. |
-| `--save-to PATH` | Also cache the retrieved credentials to this JSON file (in addition to the automatic default cache). |
+| `--save-creds PATH` | Also cache the retrieved credentials to this JSON file (in addition to the automatic default cache). |
 
 Scripts that call `get_plex_credentials()` directly (rather than going through its CLI) get the automatic default-cache check/save for free, since `auto_cache=True` is the default.
 
@@ -138,7 +138,7 @@ Full options:
 | `--dry-run` | Preview changes without writing any ratings. |
 | `--backup-ratings-to PATH` | Save current ratings to JSON before updating. |
 
-(Plus the shared auth flags above: `--url`, `--username`, `--password`, `--credential-file`, `--save-to`.)
+(Plus the shared auth flags above: `--url`, `--username`, `--password`, `--credential-file`, `--save-creds`.)
 
 ### `upload_playlist.py`
 
@@ -166,7 +166,7 @@ Full options:
 | `--title` | Title to give the created playlist in Plex (required). |
 | `--section` | Music library section name to import into. Defaults to the server's only music library. |
 
-(Plus the shared auth flags above: `--url`, `--username`, `--password`, `--credential-file`, `--save-to`.)
+(Plus the shared auth flags above: `--url`, `--username`, `--password`, `--credential-file`, `--save-creds`.)
 
 ### `retrieve_playlist.py`
 
@@ -193,7 +193,7 @@ Full options:
 | `--playlist` | Title of the Plex playlist to retrieve (required). |
 | `--save-path` | Path to save the m3u file to. Defaults to `<playlist name>.m3u` in the current directory. |
 
-(Plus the shared auth flags above: `--url`, `--username`, `--password`, `--credential-file`, `--save-to`.)
+(Plus the shared auth flags above: `--url`, `--username`, `--password`, `--credential-file`, `--save-creds`.)
 
 ## Testing
 

@@ -98,12 +98,12 @@ def parse_args(argv=None) -> argparse.Namespace:
         default=None,
         help=(
             "Path to a JSON credential file previously saved with "
-            "--save-to. If given, login is skipped and credentials are "
+            "--save-creds. If given, login is skipped and credentials are "
             "loaded from this file instead."
         ),
     )
     parser.add_argument(
-        "--save-to",
+        "--save-creds",
         default=None,
         help="Path to save the retrieved credentials to as a JSON file cache.",
     )
@@ -128,8 +128,8 @@ def main(argv=None) -> int:
                 password=args.password,
             )
 
-        if args.save_to:
-            save_plex_credentials(plex_credentials, args.save_to)
+        if args.save_creds:
+            save_plex_credentials(plex_credentials, args.save_creds)
 
         plex = PlexServer(plex_credentials["url"], plex_credentials["token"])
         retrieve_playlist(plex, args.playlist, save_path=args.save_path)

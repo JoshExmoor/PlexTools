@@ -205,15 +205,15 @@ def parse_args(argv=None) -> argparse.Namespace:
         "--credential-file",
         default=None,
         help=(
-            "Path to a JSON credential file previously saved with --save-to "
-            "(or the default cache). If given, login is skipped and "
-            "credentials are loaded from this file instead. Combine with "
-            "--url to pick one server out of a file with multiple saved "
-            "servers."
+            "Path to a JSON credential file previously saved with "
+            "--save-creds (or the default cache). If given, login is "
+            "skipped and credentials are loaded from this file instead. "
+            "Combine with --url to pick one server out of a file with "
+            "multiple saved servers."
         ),
     )
     parser.add_argument(
-        "--save-to",
+        "--save-creds",
         default=None,
         help="Path to save the retrieved credentials to as a JSON file cache.",
     )
@@ -247,8 +247,8 @@ def main(argv=None) -> int:
                 auto_cache=not args.no_auto_cache,
             )
 
-        if args.save_to:
-            save_plex_credentials(plex_credentials, args.save_to)
+        if args.save_creds:
+            save_plex_credentials(plex_credentials, args.save_creds)
     except (
         Unauthorized,
         PlexApiException,
