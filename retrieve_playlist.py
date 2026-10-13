@@ -62,17 +62,17 @@ def parse_args(argv=None) -> argparse.Namespace:
         description="Retrieve a Plex playlist by name and save it as a local m3u file.",
     )
     parser.add_argument(
-        "--playlist",
+        "-m", "--playlist",
         required=True,
         help="Title of the Plex playlist to retrieve.",
     )
     parser.add_argument(
-        "--save-path",
+        "-o", "--save-path",
         default=None,
         help="Path to save the m3u file to. Defaults to '<playlist name>.m3u' in the current directory.",
     )
     parser.add_argument(
-        "--url",
+        "-l", "--url",
         default=None,
         help=(
             "Base URL of the Plex server, e.g. http://localhost:32400. "
@@ -80,12 +80,12 @@ def parse_args(argv=None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--username",
+        "-u", "--username",
         default=None,
         help="Plex username. Prompted via console input if omitted.",
     )
     parser.add_argument(
-        "--password",
+        "-p", "--password",
         default=None,
         help=(
             "Plex password. Prompted via a hidden console prompt if omitted. "
@@ -94,7 +94,7 @@ def parse_args(argv=None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--credential-file",
+        "-c", "--credential-file",
         default=None,
         help=(
             "Path to a JSON credential file previously saved with "
@@ -103,7 +103,7 @@ def parse_args(argv=None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--save-creds",
+        "-S", "--save-creds",
         default=None,
         help="Path to save the retrieved credentials to as a JSON file cache.",
     )

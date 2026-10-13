@@ -101,33 +101,33 @@ def parse_args(argv=None) -> argparse.Namespace:
         description="Set a star rating on every track in a Plex playlist.",
     )
     parser.add_argument(
-        "--playlist",
+        "-m", "--playlist",
         required=True,
         help="Title of the Plex playlist to update.",
     )
     parser.add_argument(
-        "--stars",
+        "-r", "--stars",
         required=True,
         type=float,
         help="Star rating from 0 to 5 in half-star steps (e.g. 0, 0.5, 1, ..., 5), as shown in Plex.",
     )
     parser.add_argument(
-        "--force-ratings",
+        "-f", "--force-ratings",
         action="store_true",
         help="Update every track even if it is already at the target rating (default: skip them).",
     )
     parser.add_argument(
-        "--dry-run",
+        "-d", "--dry-run",
         action="store_true",
         help="Report what would change without actually updating any ratings.",
     )
     parser.add_argument(
-        "--backup-ratings-to",
+        "-b", "--backup-ratings-to",
         default=None,
         help="Optional path to save each track's current rating as JSON before making changes.",
     )
     parser.add_argument(
-        "--url",
+        "-l", "--url",
         default=None,
         help=(
             "Base URL of the Plex server, e.g. http://localhost:32400. "
@@ -135,12 +135,12 @@ def parse_args(argv=None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--username",
+        "-u", "--username",
         default=None,
         help="Plex username. Prompted via console input if omitted.",
     )
     parser.add_argument(
-        "--password",
+        "-p", "--password",
         default=None,
         help=(
             "Plex password. Prompted via a hidden console prompt if omitted. "
@@ -149,7 +149,7 @@ def parse_args(argv=None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--credential-file",
+        "-c", "--credential-file",
         default=None,
         help=(
             "Path to a JSON credential file previously saved with "
@@ -158,7 +158,7 @@ def parse_args(argv=None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--save-creds",
+        "-S", "--save-creds",
         default=None,
         help="Path to save the retrieved credentials to as a JSON file cache.",
     )

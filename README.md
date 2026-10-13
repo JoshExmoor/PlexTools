@@ -79,29 +79,30 @@ The cache file holds credentials for **multiple servers**, keyed by url:
 
 ```powershell
 # Interactive login; checks/updates the default cache (~/.creds/plex_creds.json) automatically
-.\.venv\Scripts\python.exe get_plex_credentials.py --url http://localhost:32400
+.\.venv\Scripts\python.exe get_plex_credentials.py -l http://localhost:32400
 
 # Force a fresh login, bypassing the automatic cache check/save
-.\.venv\Scripts\python.exe get_plex_credentials.py --url http://localhost:32400 --no-auto-cache
+.\.venv\Scripts\python.exe get_plex_credentials.py -l http://localhost:32400 -n
 
 # Also cache the result to a specific file (in addition to the default cache)
-.\.venv\Scripts\python.exe get_plex_credentials.py --url http://localhost:32400 --save-creds creds.json
+.\.venv\Scripts\python.exe get_plex_credentials.py -l http://localhost:32400 -S creds.json
 
 # Skip login entirely using a cached file (single-server file, or combine with --url for multi-server)
-.\.venv\Scripts\python.exe get_plex_credentials.py --credential-file creds.json
-.\.venv\Scripts\python.exe get_plex_credentials.py --credential-file creds.json --url http://server2:32400
+.\.venv\Scripts\python.exe get_plex_credentials.py -c creds.json
+.\.venv\Scripts\python.exe get_plex_credentials.py -c creds.json -l http://server2:32400
 ```
 
 ### Convention for new scripts
 
-Every script in this project that needs a token follows the same CLI shape, so credentials never need to be typed twice:
+Every script in this project that needs a token follows the same CLI shape (long form plus a short alias), so credentials never need to be typed twice:
 
-| Flag | Purpose |
-|---|---|
-| `--url` | Base URL of the Plex server. Required unless `--credential-file` is given. |
-| `--username` / `--password` | Optional; prompted if omitted and no valid cached token is found. |
-| `--credential-file PATH` | Skip live login; load cached credentials from this JSON file instead. Combine with `--url` to pick one server out of a file with multiple saved servers. |
-| `--save-creds PATH` | Also cache the retrieved credentials to this JSON file (in addition to the automatic default cache). |
+| Flag | Short | Purpose |
+|---|---|---|
+| `--url` | `-l` | Base URL of the Plex server. Required unless `--credential-file` is given. |
+| `--username` | `-u` | Optional; prompted if omitted and no valid cached token is found. |
+| `--password` | `-p` | Optional; prompted (hidden) if omitted and no valid cached token is found. |
+| `--credential-file PATH` | `-c` | Skip live login; load cached credentials from this JSON file instead. Combine with `--url`/`-l` to pick one server out of a file with multiple saved servers. |
+| `--save-creds PATH` | `-S` | Also cache the retrieved credentials to this JSON file (in addition to the automatic default cache). |
 
 Scripts that call `get_plex_credentials()` directly (rather than going through its CLI) get the automatic default-cache check/save for free, since `auto_cache=True` is the default.
 
@@ -115,30 +116,30 @@ Sets a star rating on every track in a Plex playlist.
 
 ```powershell
 .\.venv\Scripts\python.exe push_plex_ratings_by_playlist.py `
-  --credential-file creds.json `
-  --playlist "Favorites" `
-  --stars 4.5
+  -c creds.json `
+  -m "Favorites" `
+  -r 4.5
 ```
 
 Key behavior:
-- **Stars, not raw Plex rating.** `--stars` takes 0-5 in half-star steps, matching what Plex displays. Internally this is converted to Plex's native 0-10 integer scale (5 stars = 10, 4.5 = 9, etc.).
-- **Skips tracks already at the target rating by default.** Pass `--force-ratings` to update every track regardless of its current rating.
-- **`--dry-run`** reports what would change without calling the Plex API to rate anything.
-- **`--backup-ratings-to PATH`** (optional) writes each track's current rating to a JSON file before making any changes, so you can manually restore if needed.
+- **Stars, not raw Plex rating.** `--stars`/`-r` takes 0-5 in half-star steps, matching what Plex displays. Internally this is converted to Plex's native 0-10 integer scale (5 stars = 10, 4.5 = 9, etc.).
+- **Skips tracks already at the target rating by default.** Pass `--force-ratings`/`-f` to update every track regardless of its current rating.
+- **`--dry-run`/`-d`** reports what would change without calling the Plex API to rate anything.
+- **`--backup-ratings-to PATH`/`-b`** (optional) writes each track's current rating to a JSON file before making any changes, so you can manually restore if needed.
 - Shows a live progress bar (`tqdm`) with a running "Updated N of M ratings" description.
 - Prints a summary line when done, e.g. `Playlist "Favorites" job run. 20/23 songs updated to 4.5 stars (rating 9). 3 already at target rating were skipped.`
 
 Full options:
 
-| Flag | Purpose |
-|---|---|
-| `--playlist` | Title of the playlist to update (required). |
-| `--stars` | Target rating, 0-5 in 0.5 steps (required). |
-| `--force-ratings` | Update every track, even ones already at the target rating. |
-| `--dry-run` | Preview changes without writing any ratings. |
-| `--backup-ratings-to PATH` | Save current ratings to JSON before updating. |
+| Flag | Short | Purpose |
+|---|---|---|
+| `--playlist` | `-m` | Title of the playlist to update (required). |
+| `--stars` | `-r` | Target rating, 0-5 in 0.5 steps (required). |
+| `--force-ratings` | `-f` | Update every track, even ones already at the target rating. |
+| `--dry-run` | `-d` | Preview changes without writing any ratings. |
+| `--backup-ratings-to PATH` | `-b` | Save current ratings to JSON before updating. |
 
-(Plus the shared auth flags above: `--url`, `--username`, `--password`, `--credential-file`, `--save-creds`.)
+(Plus the shared auth flags above: `--url`/`-l`, `--username`/`-u`, `--password`/`-p`, `--credential-file`/`-c`, `--save-creds`/`-S`.)
 
 ### `upload_playlist.py`
 
@@ -146,27 +147,27 @@ Uploads an m3u playlist file to Plex as a new playlist, in a music library.
 
 ```powershell
 .\.venv\Scripts\python.exe upload_playlist.py `
-  --credential-file creds.json `
-  --m3u-path "D:\Music\Playlists\RoadTrip.m3u" `
-  --title "Road Trip"
+  -c creds.json `
+  -i "D:\Music\Playlists\RoadTrip.m3u" `
+  -t "Road Trip"
 ```
 
-**Important:** m3u import is a server-side operation in Plex — `--m3u-path` must be a path the *Plex Media Server process itself* can read (its local disk, or a volume it has mounted), not necessarily this machine. If this script runs somewhere other than the Plex server host, the path needs to resolve on the server's filesystem (e.g. a shared/mounted path), or the import will fail with a `BadRequest`.
+**Important:** m3u import is a server-side operation in Plex — `--m3u-path`/`-i` must be a path the *Plex Media Server process itself* can read (its local disk, or a volume it has mounted), not necessarily this machine. If this script runs somewhere other than the Plex server host, the path needs to resolve on the server's filesystem (e.g. a shared/mounted path), or the import will fail with a `BadRequest`.
 
 Key behavior:
 - Only works against **music** library sections (a PlexAPI/Plex Media Server limitation on m3u import).
-- If `--section` is omitted, the tool uses the server's only music library section. If there's more than one, it raises an error asking you to specify `--section` explicitly.
+- If `--section`/`-s` is omitted, the tool uses the server's only music library section. If there's more than one, it raises an error asking you to specify `--section` explicitly.
 - Re-uploading the same m3u path overwrites any playlist previously created from that file (this is Plex server behavior, not something this tool controls).
 
 Full options:
 
-| Flag | Purpose |
-|---|---|
-| `--m3u-path` | Path to the m3u file, as seen by the Plex server (required). |
-| `--title` | Title to give the created playlist in Plex (required). |
-| `--section` | Music library section name to import into. Defaults to the server's only music library. |
+| Flag | Short | Purpose |
+|---|---|---|
+| `--m3u-path` | `-i` | Path to the m3u file, as seen by the Plex server (required). |
+| `--title` | `-t` | Title to give the created playlist in Plex (required). |
+| `--section` | `-s` | Music library section name to import into. Defaults to the server's only music library. |
 
-(Plus the shared auth flags above: `--url`, `--username`, `--password`, `--credential-file`, `--save-creds`.)
+(Plus the shared auth flags above: `--url`/`-l`, `--username`/`-u`, `--password`/`-p`, `--credential-file`/`-c`, `--save-creds`/`-S`.)
 
 ### `retrieve_playlist.py`
 
@@ -174,12 +175,12 @@ Retrieves a Plex playlist by name and saves it as a local m3u file.
 
 ```powershell
 .\.venv\Scripts\python.exe retrieve_playlist.py `
-  --credential-file creds.json `
-  --playlist "Road Trip" `
-  --save-path "D:\Backups\RoadTrip.m3u"
+  -c creds.json `
+  -m "Road Trip" `
+  -o "D:\Backups\RoadTrip.m3u"
 ```
 
-If `--save-path` is omitted, the playlist is saved as `<playlist name>.m3u` in the current directory (unsafe filename characters are replaced with `_`).
+If `--save-path`/`-o` is omitted, the playlist is saved as `<playlist name>.m3u` in the current directory (unsafe filename characters are replaced with `_`).
 
 Key behavior:
 - plexapi has no built-in m3u export, so this builds the m3u file itself from each track's underlying file path(s) (`track.iterParts()` → `part.file`), with one `#EXTINF`/path pair per track.
@@ -188,12 +189,12 @@ Key behavior:
 
 Full options:
 
-| Flag | Purpose |
-|---|---|
-| `--playlist` | Title of the Plex playlist to retrieve (required). |
-| `--save-path` | Path to save the m3u file to. Defaults to `<playlist name>.m3u` in the current directory. |
+| Flag | Short | Purpose |
+|---|---|---|
+| `--playlist` | `-m` | Title of the Plex playlist to retrieve (required). |
+| `--save-path` | `-o` | Path to save the m3u file to. Defaults to `<playlist name>.m3u` in the current directory. |
 
-(Plus the shared auth flags above: `--url`, `--username`, `--password`, `--credential-file`, `--save-creds`.)
+(Plus the shared auth flags above: `--url`/`-l`, `--username`/`-u`, `--password`/`-p`, `--credential-file`/`-c`, `--save-creds`/`-S`.)
 
 ## Testing
 
