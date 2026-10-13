@@ -4,20 +4,46 @@ A growing collection of command-line tools built on [python-plexapi](https://pyt
 
 ## Setup
 
-This project uses a Python virtual environment at `.venv`.
+This project uses a Python virtual environment at `.venv`. **Every command below — installing dependencies and running scripts — must use that same environment.** Mixing a venv install with a global-Python run (or vice versa) is the most common source of confusing "but it says it's installed!" errors with this project; see the troubleshooting note at the end of this section if you hit that.
 
 ```powershell
 # Create the venv (first time only)
 python -m venv .venv
 
-# Install dependencies
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+# Activate it in your current shell (do this every time you open a new terminal for this project)
+.\.venv\Scripts\Activate.ps1
+
+# Install dependencies - now that the venv is active, bare `python`/`pip` are safe to use
+pip install -r requirements.txt
 ```
 
-All example commands below assume you run them with the venv's Python:
+Once activated, your prompt is prefixed with `(.venv)` and plain `python`/`pip` commands in that shell stay inside the venv - including running the tools:
 
 ```powershell
+python push_plex_ratings_by_playlist.py ...
+```
+
+If you'd rather not activate (e.g. a one-off command, or a script calling into this project), use the venv's Python explicitly instead - this works from any shell state and is what the rest of this README uses in its examples:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
 .\.venv\Scripts\python.exe <script>.py ...
+```
+
+**Don't mix the two approaches within one install.** If you ever see a package reported as "already installed" by `pip` but a script still fails with `ModuleNotFoundError`, it means the install and the run used two different Python interpreters. Confirm which one is active:
+
+```powershell
+# Shows the interpreter actually running - compare this to .venv's path
+python -c "import sys; print(sys.executable)"
+
+# Shows what's installed in the venv specifically, regardless of shell state
+.\.venv\Scripts\python.exe -m pip list
+```
+
+If the venv is missing a package that `requirements.txt` lists, reinstall explicitly against it rather than guessing which `pip` is active:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
 ## Shared authentication
