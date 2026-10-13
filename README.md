@@ -96,6 +96,61 @@ Full options:
 
 (Plus the shared auth flags above: `--url`, `--username`, `--password`, `--credential-file`, `--save-to`.)
 
+### `upload_playlist.py`
+
+Uploads an m3u playlist file to Plex as a new playlist, in a music library.
+
+```powershell
+.\.venv\Scripts\python.exe upload_playlist.py `
+  --credential-file creds.json `
+  --m3u-path "D:\Music\Playlists\RoadTrip.m3u" `
+  --title "Road Trip"
+```
+
+**Important:** m3u import is a server-side operation in Plex — `--m3u-path` must be a path the *Plex Media Server process itself* can read (its local disk, or a volume it has mounted), not necessarily this machine. If this script runs somewhere other than the Plex server host, the path needs to resolve on the server's filesystem (e.g. a shared/mounted path), or the import will fail with a `BadRequest`.
+
+Key behavior:
+- Only works against **music** library sections (a PlexAPI/Plex Media Server limitation on m3u import).
+- If `--section` is omitted, the tool uses the server's only music library section. If there's more than one, it raises an error asking you to specify `--section` explicitly.
+- Re-uploading the same m3u path overwrites any playlist previously created from that file (this is Plex server behavior, not something this tool controls).
+
+Full options:
+
+| Flag | Purpose |
+|---|---|
+| `--m3u-path` | Path to the m3u file, as seen by the Plex server (required). |
+| `--title` | Title to give the created playlist in Plex (required). |
+| `--section` | Music library section name to import into. Defaults to the server's only music library. |
+
+(Plus the shared auth flags above: `--url`, `--username`, `--password`, `--credential-file`, `--save-to`.)
+
+### `retrieve_playlist.py`
+
+Retrieves a Plex playlist by name and saves it as a local m3u file.
+
+```powershell
+.\.venv\Scripts\python.exe retrieve_playlist.py `
+  --credential-file creds.json `
+  --playlist "Road Trip" `
+  --save-path "D:\Backups\RoadTrip.m3u"
+```
+
+If `--save-path` is omitted, the playlist is saved as `<playlist name>.m3u` in the current directory (unsafe filename characters are replaced with `_`).
+
+Key behavior:
+- plexapi has no built-in m3u export, so this builds the m3u file itself from each track's underlying file path(s) (`track.iterParts()` → `part.file`), with one `#EXTINF`/path pair per track.
+- Those file paths are as seen by the **Plex server**, same caveat as `upload_playlist.py` in reverse: if this script runs elsewhere, the m3u's paths may not resolve locally unless that filesystem is shared/mounted. The m3u is still correct as a backup of the playlist's track list and titles.
+- Tracks with no resolvable file path (e.g. missing media) are skipped and reported, rather than failing the whole export.
+
+Full options:
+
+| Flag | Purpose |
+|---|---|
+| `--playlist` | Title of the Plex playlist to retrieve (required). |
+| `--save-path` | Path to save the m3u file to. Defaults to `<playlist name>.m3u` in the current directory. |
+
+(Plus the shared auth flags above: `--url`, `--username`, `--password`, `--credential-file`, `--save-to`.)
+
 ## Testing
 
 Tests are written with [pytest](https://docs.pytest.org/) and live under `tests/`. They run entirely offline — no real Plex server or plex.tv login is contacted; all `plexapi` interaction is mocked.
@@ -116,9 +171,13 @@ Run a single file or a verbose run:
 PlexTools/
 ├── get_plex_credentials.py            # Shared Plex auth: login, token cache save/load
 ├── push_plex_ratings_by_playlist.py   # Bulk-set star ratings for a playlist's tracks
+├── upload_playlist.py                 # Import an m3u file into Plex as a new playlist
+├── retrieve_playlist.py               # Export a Plex playlist to a local m3u file
 ├── tests/
 │   ├── test_get_plex_credentials.py
-│   └── test_push_plex_ratings_by_playlist.py
+│   ├── test_push_plex_ratings_by_playlist.py
+│   ├── test_upload_playlist.py
+│   └── test_retrieve_playlist.py
 ├── conftest.py                        # Makes project root importable for tests
 ├── requirements.txt
 └── README.md
