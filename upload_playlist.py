@@ -51,7 +51,7 @@ def detect_path_style(music_section: MusicSection, sample_size: int = 20) -> str
     """
     windows_votes = 0
     posix_votes = 0
-    for track in music_section.searchTracks(libtype="track", maxresults=sample_size):
+    for track in music_section.searchTracks(maxresults=sample_size):
         for file_path in _iter_track_file_paths(track):
             if _WINDOWS_PATH_RE.match(file_path):
                 windows_votes += 1
@@ -156,7 +156,7 @@ def reconcile_playlist(
     # NOTE: this fetches the whole section once; on a large library this is the
     # slowest/most memory-intensive step.
     path_to_track = {}
-    for track in music_section.searchTracks(libtype="track"):
+    for track in music_section.searchTracks():
         for file_path in _iter_track_file_paths(track):
             path_to_track[normalize_path_for_compare(file_path, style)] = track
 

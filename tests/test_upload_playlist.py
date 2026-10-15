@@ -134,6 +134,25 @@ def test_detect_path_style_falls_back_to_posix_when_no_samples():
     assert up.detect_path_style(section) == "posix"
 
 
+def test_detect_path_style_does_not_pass_libtype_to_search_tracks():
+    # Regression: searchTracks() already hardcodes libtype='track' internally,
+    # so passing libtype="track" ourselves makes the real plexapi raise
+    # "got multiple values for keyword argument 'libtype'". Ensure we don't.
+    section = make_music_section([make_track(["/music/a.mp3"])])
+    up.detect_path_style(section)
+    for call in section.searchTracks.call_args_list:
+        assert "libtype" not in call.kwargs, f"searchTracks called with libtype: {call}"
+
+
+def test_reconcile_does_not_pass_libtype_to_search_tracks():
+    section = make_music_section([make_track(["/music/a.mp3"])])
+    playlist = MagicMock()
+    playlist.items.return_value = []
+    up.reconcile_playlist(MagicMock(), playlist, section, ["/music/a.mp3"], "posix")
+    for call in section.searchTracks.call_args_list:
+        assert "libtype" not in call.kwargs, f"searchTracks called with libtype: {call}"
+
+
 # ---------------------------------------------------------------------------
 # write_normalized_m3u()
 # ---------------------------------------------------------------------------
