@@ -196,6 +196,35 @@ Full options:
 
 (Plus the shared auth flags above: `--url`/`-l`, `--username`/`-u`, `--password`/`-p`, `--credential-file`/`-c`, `--save-creds`/`-S`.)
 
+### `backup_plex_playcounts.py`
+
+Backs up the play count (and rating) of every played song in a music library to a JSON file.
+
+```powershell
+.\.venv\Scripts\python.exe backup_plex_playcounts.py `
+  -c creds.json `
+  -s "Music" `
+  -o "D:\Backups\playcounts.json"
+```
+
+Retrieves every track in the section with a play count of 1 or more and writes a JSON array, one object per song, each with `path` (file location as seen by the Plex server), `artist`, `album`, `title`, `rating` (user rating on Plex's 0-10 scale, `null` if unrated), and `playcount`.
+
+Key behavior:
+- `--output`/`-o` is **required** — the script always writes to a file you specify.
+- `--section`/`-s` defaults to `"Music"`. Must be a music library; the script errors if the named section isn't one.
+- Only songs with `playcount >= 1` are included (unplayed tracks are skipped).
+- `path` is the file location as the **Plex server** sees it (same caveat as the playlist tools: it may not resolve locally if this script runs on a different machine than the server). Tracks with no resolvable file path are still backed up, with `path` set to `null`, and the count of such tracks is reported on stderr.
+- Note: Plex itself only lets you *reset* a play count or increment it by one play at a time (there's no "set play count to N" in the Plex API), so this backup is best paired with a restore approach that accounts for that limitation.
+
+Full options:
+
+| Flag | Short | Purpose |
+|---|---|---|
+| `--output` | `-o` | Path to write the play count backup JSON to (required). |
+| `--section` | `-s` | Music library section name to read from (default: `Music`). |
+
+(Plus the shared auth flags above: `--url`/`-l`, `--username`/`-u`, `--password`/`-p`, `--credential-file`/`-c`, `--save-creds`/`-S`.)
+
 ## Testing
 
 Tests are written with [pytest](https://docs.pytest.org/) and live under `tests/`. They run entirely offline — no real Plex server or plex.tv login is contacted; all `plexapi` interaction is mocked.
@@ -218,11 +247,13 @@ PlexTools/
 ├── push_plex_ratings_by_playlist.py   # Bulk-set star ratings for a playlist's tracks
 ├── upload_playlist.py                 # Import an m3u file into Plex as a new playlist
 ├── retrieve_playlist.py               # Export a Plex playlist to a local m3u file
+├── backup_plex_playcounts.py          # Back up play counts of all played songs to JSON
 ├── tests/
 │   ├── test_get_plex_credentials.py
 │   ├── test_push_plex_ratings_by_playlist.py
 │   ├── test_upload_playlist.py
-│   └── test_retrieve_playlist.py
+│   ├── test_retrieve_playlist.py
+│   └── test_backup_plex_playcounts.py
 ├── conftest.py                        # Makes project root importable for tests
 ├── requirements.txt
 └── README.md
