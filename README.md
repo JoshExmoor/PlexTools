@@ -242,6 +242,42 @@ Full options:
 
 (Plus the shared auth flags above: `--url`/`-l`, `--username`/`-u`, `--password`/`-p`, `--credential-file`/`-c`, `--save-creds`/`-S`.)
 
+### `list_playlists.py`
+
+Lists, filters, and compares Plex playlists. Read-only — it never modifies or deletes anything, so it's safe to run freely (use `upload_playlist.py --remove-duplicates` for cleanup).
+
+```powershell
+# All playlists, flagging any duplicate titles
+.\.venv\Scripts\python.exe list_playlists.py -c creds.json
+
+# Only playlists whose title is shared by more than one playlist
+.\.venv\Scripts\python.exe list_playlists.py -c creds.json --duplicates-only
+
+# Compare the track contents of two playlists (e.g. duplicates) by ratingKey
+.\.venv\Scripts\python.exe list_playlists.py -c creds.json --diff 856096 856787
+```
+
+Key behavior:
+- **Filters:** `--title`/`-t` (exact, case-insensitive), `--title-contains` (substring, case-insensitive), `--type audio|video|photo`, and `--smart`/`--no-smart`.
+- **Duplicate detection** is case-insensitive and consistent with `upload_playlist.py` — same-titled playlists (which Plex can create because it keys m3u imports by path, not title) are flagged with each one's metadata on stderr. `--duplicates-only`/`-d` narrows the listing to just those.
+- **`--diff RATINGKEY_A RATINGKEY_B`** compares two playlists' track contents (by file path, so the same song in different files is treated as distinct) and reports what's only in A, only in B, and in both — the quickest way to see *how* two duplicates differ.
+- **Output formats** via `--format`/`-f`: `table` (default, human-readable), `json`, or `csv` (handy for spreadsheet comparison). `--output`/`-o` also writes the rendered output to a file. In `json`/`csv` mode the duplicate warning goes to stderr so it doesn't corrupt machine-readable stdout.
+
+Full options:
+
+| Flag | Short | Purpose |
+|---|---|---|
+| `--title` | `-t` | Only list playlists with this exact title (case-insensitive). |
+| `--title-contains` | | Only list playlists whose title contains this substring. |
+| `--type` | | Filter by playlist type: `audio`, `video`, or `photo`. |
+| `--smart` / `--no-smart` | | Only smart, or only regular, playlists. |
+| `--duplicates-only` | `-d` | Only show playlists whose title is shared by more than one. |
+| `--diff` | | Compare two playlists' track contents by ratingKey. |
+| `--format` | `-f` | Output format: `table` (default), `json`, or `csv`. |
+| `--output` | `-o` | Also write the rendered output to this file. |
+
+(Plus the shared auth flags above: `--url`/`-l`, `--username`/`-u`, `--password`/`-p`, `--credential-file`/`-c`, `--save-creds`/`-S`.)
+
 ## Testing
 
 Tests are written with [pytest](https://docs.pytest.org/) and live under `tests/`. They run entirely offline — no real Plex server or plex.tv login is contacted; all `plexapi` interaction is mocked.
@@ -265,12 +301,14 @@ PlexTools/
 ├── upload_playlist.py                 # Import an m3u file into Plex as a new playlist
 ├── retrieve_playlist.py               # Export a Plex playlist to a local m3u file
 ├── backup_plex_playcounts.py          # Back up play counts of all played songs to JSON
+├── list_playlists.py                  # List, filter, and compare (diff) Plex playlists
 ├── tests/
 │   ├── test_get_plex_credentials.py
 │   ├── test_push_plex_ratings_by_playlist.py
 │   ├── test_upload_playlist.py
 │   ├── test_retrieve_playlist.py
-│   └── test_backup_plex_playcounts.py
+│   ├── test_backup_plex_playcounts.py
+│   └── test_list_playlists.py
 ├── conftest.py                        # Makes project root importable for tests
 ├── requirements.txt
 └── README.md
