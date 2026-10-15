@@ -159,6 +159,16 @@ Key behavior:
 - If `--section`/`-s` is omitted, the tool uses the server's only music library section. If there's more than one, it raises an error asking you to specify `--section` explicitly.
 - Re-uploading the same m3u path overwrites any playlist previously created from that file (this is Plex server behavior, not something this tool controls).
 
+**Path normalization (handles case/separator mismatches).** The m3u import matches each path against the library *server-side*, and on a Windows server a lower-case drive letter (`e:\` vs `E:\`) or forward slashes can make a line silently fail to match. Before importing, the tool samples a few existing tracks to detect the server's path style, writes a normalized copy of the m3u alongside the original (`.normalized_<name>.m3u`, deleted afterward), and imports that:
+- **Windows server:** drive letters are upper-cased and separators switched to `\`. Matching is case-insensitive.
+- **Linux/POSIX server:** paths are left as-is — POSIX filesystems are case-sensitive, so rewriting case would risk matching the wrong file. Matching is case-sensitive.
+
+**Reconciliation (recovers silently-dropped tracks).** Plex's m3u import gives no per-track feedback and silently skips lines it can't match. After importing, the tool compares the resulting playlist against the m3u's track list, and for any expected track that's missing but *does* exist in the library, adds it via the playlist API. Tracks genuinely not found in the library are reported on stderr. This runs by default; pass `--no-reconcile`/`-R` to skip it. The reconciliation step fetches all tracks in the section once to build a path lookup, which is the slowest/most memory-intensive part on a large library.
+
+**Replace an existing playlist.** By default, uploading when a playlist of the same name already exists can merge into or duplicate it. Pass `--replace`/`-x` to delete any existing playlist with the same title first, so the upload starts from scratch. This is destructive to the old playlist, so it's off by default.
+
+The helper functions (`detect_path_style`, `write_normalized_m3u`, `reconcile_playlist`, `delete_existing_playlist`) are importable for reuse in other scripts.
+
 Full options:
 
 | Flag | Short | Purpose |
@@ -166,6 +176,8 @@ Full options:
 | `--m3u-path` | `-i` | Path to the m3u file, as seen by the Plex server (required). |
 | `--title` | `-t` | Title to give the created playlist in Plex (required). |
 | `--section` | `-s` | Music library section name to import into. Defaults to the server's only music library. |
+| `--no-reconcile` | `-R` | Skip the post-import back-fill of tracks the import silently dropped. |
+| `--replace` | `-x` | Delete any existing playlist with the same title before uploading (destructive). |
 
 (Plus the shared auth flags above: `--url`/`-l`, `--username`/`-u`, `--password`/`-p`, `--credential-file`/`-c`, `--save-creds`/`-S`.)
 
