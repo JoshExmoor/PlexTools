@@ -1,13 +1,16 @@
 import argparse
+import json
 import os
 import re
 import sys
+from pathlib import Path
 
 import requests
 from plexapi.exceptions import BadRequest, NotFound, PlexApiException, Unauthorized
 from plexapi.library import MusicSection
 from plexapi.playlist import Playlist
 from plexapi.server import PlexServer
+from tqdm import tqdm
 
 from get_plex_credentials import get_plex_credentials, retrieve_plex_credentials, save_plex_credentials
 
@@ -34,6 +37,37 @@ def _iter_track_file_paths(track):
     for part in track.iterParts():
         if part.file:
             yield part.file
+
+
+# Number of tracks to request per page when fetching a whole section. Plex's
+# own default container size is 100; a larger page means fewer round-trips.
+_TRACK_PAGE_SIZE = 200
+
+
+def iter_section_tracks(music_section: MusicSection, page_size: int = _TRACK_PAGE_SIZE):
+    """Yields every track in a music section, one page at a time.
+
+    plexapi's searchTracks() fetches the ENTIRE section in a single blocking
+    call (it pages internally but returns nothing until done), so it can't
+    report progress. This drives the same pagination ourselves - requesting one
+    page of `page_size` tracks per call via container_start/container_size - and
+    yields each track as its page arrives, so a caller can show real progress as
+    the fetch proceeds. Stops when a page comes back empty.
+    """
+    offset = 0
+    while True:
+        page = music_section.searchTracks(
+            container_start=offset,
+            container_size=page_size,
+            maxresults=page_size,
+        )
+        if not page:
+            break
+        for track in page:
+            yield track
+        if len(page) < page_size:
+            break  # last (partial) page - no need for another round-trip
+        offset += len(page)
 
 
 def detect_path_style(music_section: MusicSection, sample_size: int = 20) -> str:
@@ -131,34 +165,146 @@ def write_normalized_m3u(source_m3u: str, dest_m3u: str, style: str) -> list:
     return corrected_paths
 
 
+def _cache_dir() -> str:
+    """Returns the directory where section track caches are stored."""
+    return str(Path.home() / ".cache" / "plextools")
+
+
+def _cache_path(section_uuid: str) -> str:
+    """Returns the cache file path for a given library section uuid."""
+    return os.path.join(_cache_dir(), f"section_{section_uuid}.json")
+
+
+def _section_fingerprint(music_section: MusicSection) -> dict:
+    """Returns the identity/validity fields used to decide if a cache is fresh.
+
+    uuid identifies the section; updatedAt and track_count together detect
+    content changes. updatedAt is NOT bumped by playlist create/modify/delete
+    (verified against a live server), so playlist churn won't invalidate the
+    cache - only actual library content changes do.
+    """
+    try:
+        track_count = int(music_section.totalViewSize(libtype="track"))
+    except Exception:
+        track_count = None
+    return {
+        "uuid": music_section.uuid,
+        "updatedAt": str(music_section.updatedAt),
+        "track_count": track_count,
+    }
+
+
+def load_track_cache(music_section: MusicSection) -> dict:
+    """Returns the cached {normalized_path: ratingKey} map plus the detected
+    path style for `music_section`, or None if there is no valid fresh cache.
+
+    The cache is considered valid only if the section's uuid, updatedAt, and
+    track count all match what was stored. Any mismatch (or a missing/corrupt
+    file) returns None so the caller does a fresh fetch.
+    """
+    path = _cache_path(music_section.uuid)
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as cache_file:
+            cached = json.load(cache_file)
+    except (OSError, json.JSONDecodeError):
+        return None
+
+    fingerprint = _section_fingerprint(music_section)
+    if (
+        cached.get("uuid") != fingerprint["uuid"]
+        or cached.get("updatedAt") != fingerprint["updatedAt"]
+        or cached.get("track_count") != fingerprint["track_count"]
+    ):
+        return None
+
+    tracks = cached.get("tracks")
+    style = cached.get("style")
+    if not isinstance(tracks, dict) or style not in ("windows", "posix"):
+        return None  # malformed cache
+    return {"tracks": tracks, "style": style}
+
+
+def save_track_cache(music_section: MusicSection, path_to_rating_key: dict, style: str) -> None:
+    """Writes the {normalized_path: ratingKey} map and detected style to the
+    section's cache file, tagged with the current validity fingerprint.
+    """
+    os.makedirs(_cache_dir(), exist_ok=True)
+    fingerprint = _section_fingerprint(music_section)
+    payload = {
+        "uuid": fingerprint["uuid"],
+        "updatedAt": fingerprint["updatedAt"],
+        "track_count": fingerprint["track_count"],
+        "style": style,
+        "tracks": path_to_rating_key,
+    }
+    with open(_cache_path(music_section.uuid), "w", encoding="utf-8") as cache_file:
+        json.dump(payload, cache_file, indent=2)
+
+
 def reconcile_playlist(
     plex: PlexServer,
     playlist: Playlist,
     music_section: MusicSection,
     expected_paths: list,
     style: str,
+    use_cache: bool = True,
 ) -> dict:
     """Compares a playlist's actual contents against the paths it was meant to
     contain, and back-fills any tracks the m3u import silently dropped.
 
     Plex's m3u import matches each line to a library item server-side and
     silently skips any it can't match, with no per-track feedback. This builds
-    a {normalized_path: Track} map of every track in `music_section`, finds the
-    `expected_paths` entries that are not already in `playlist`, looks each one
-    up in that map, and adds the ones it can find via Playlist.addItems.
+    a {normalized_path: ratingKey} map of every track in `music_section`, finds
+    the `expected_paths` entries that are not already in `playlist`, resolves
+    those to Track objects, and adds them via Playlist.addItems.
+
+    When `use_cache` is True (default), the section's path->ratingKey map is
+    loaded from a local cache if one exists and is still valid (same uuid,
+    updatedAt, and track count); on a miss it is fetched from the server and the
+    cache is refreshed. Pass use_cache=False to always fetch fresh.
 
     Returns a report dict with keys:
         already_present - count of expected paths already in the playlist
         added           - list of paths that were found and added
         unresolvable    - list of paths not found anywhere in the section
     """
-    # Build a lookup of every track in the section keyed by normalized path.
-    # NOTE: this fetches the whole section once; on a large library this is the
-    # slowest/most memory-intensive step.
-    path_to_track = {}
-    for track in music_section.searchTracks():
-        for file_path in _iter_track_file_paths(track):
-            path_to_track[normalize_path_for_compare(file_path, style)] = track
+    # path_to_rating_key maps normalized file path -> track ratingKey (a stable
+    # server id). We key on ratingKey rather than live Track objects so the map
+    # can be cached as plain JSON; the few tracks actually being added are
+    # resolved back to Track objects at the end via a single bulk fetch.
+    path_to_rating_key = None
+
+    if use_cache:
+        cached = load_track_cache(music_section)
+        if cached is not None:
+            path_to_rating_key = cached["tracks"]
+            style = cached["style"]  # trust the cached style for this section
+            print(f"Using cached library track index ({len(path_to_rating_key)} tracks).")
+
+    if path_to_rating_key is None:
+        # Cache miss (or disabled): fetch the whole section. This is the slowest
+        # step on a large library, so we page through it with iter_section_tracks
+        # (rather than searchTracks(), which blocks until the entire fetch
+        # completes) so the progress bar advances as each page actually arrives.
+        try:
+            total_tracks = int(music_section.totalViewSize(libtype="track"))
+        except Exception:
+            total_tracks = None
+
+        path_to_rating_key = {}
+        for track in tqdm(
+            iter_section_tracks(music_section),
+            total=total_tracks,
+            desc="Fetching library tracks",
+            unit="track",
+        ):
+            for file_path in _iter_track_file_paths(track):
+                path_to_rating_key[normalize_path_for_compare(file_path, style)] = int(track.ratingKey)
+
+        if use_cache:
+            save_track_cache(music_section, path_to_rating_key, style)
 
     # What the playlist actually contains right now.
     present_keys = set()
@@ -167,7 +313,8 @@ def reconcile_playlist(
             present_keys.add(normalize_path_for_compare(file_path, style))
 
     already_present = 0
-    to_add = []
+    added_paths = []
+    rating_keys_to_add = []
     unresolvable = []
     seen = set()
     for path in expected_paths:
@@ -177,34 +324,89 @@ def reconcile_playlist(
         seen.add(key)
         if key in present_keys:
             already_present += 1
-        elif key in path_to_track:
-            to_add.append((path, path_to_track[key]))
+        elif key in path_to_rating_key:
+            added_paths.append(path)
+            rating_keys_to_add.append(int(path_to_rating_key[key]))
         else:
             unresolvable.append(path)
 
-    if to_add:
-        playlist.addItems([track for _, track in to_add])
+    if rating_keys_to_add:
+        # Resolve only the tracks being added (one bulk request), then add them.
+        # Build the /library/metadata/<k1,k2,...> key string explicitly rather
+        # than passing a list of ints: the string form of fetchItems is the
+        # universally-supported contract, while the list-of-ints convenience is
+        # version-dependent (older plexapi builds the URL wrong and raises
+        # "Failed to parse: <baseurl>[...]").
+        metadata_key = "/library/metadata/" + ",".join(str(k) for k in rating_keys_to_add)
+        tracks_to_add = plex.fetchItems(metadata_key)
+        playlist.addItems(tracks_to_add)
 
     return {
         "already_present": already_present,
-        "added": [path for path, _ in to_add],
+        "added": added_paths,
         "unresolvable": unresolvable,
     }
 
 
-def delete_existing_playlist(plex: PlexServer, title: str) -> bool:
-    """Deletes the playlist with the given title if one exists.
+def find_playlists_by_title(plex: PlexServer, title: str) -> list:
+    """Returns all playlists whose title matches `title` case-insensitively.
 
-    Returns True if a playlist was deleted, False if none existed. Used to make
-    an upload start from scratch rather than merging into/duplicating a
-    pre-existing playlist of the same name.
+    Plex keys m3u-imported playlists by the m3u file PATH, not the title, so a
+    changed m3u path can leave multiple playlists sharing one name. This finds
+    every one of them so callers can warn about or clean up duplicates.
     """
-    try:
-        existing = plex.playlist(title)
-    except NotFound:
-        return False
-    existing.delete()
-    return True
+    wanted = title.casefold()
+    return [p for p in plex.playlists() if (p.title or "").casefold() == wanted]
+
+
+def _format_playlist_line(playlist) -> str:
+    """One-line human-readable summary of a playlist's identifying metadata."""
+    return (
+        f'  - "{playlist.title}" (ratingKey={playlist.ratingKey}, '
+        f"items={playlist.leafCount}, added={playlist.addedAt}, "
+        f"updated={playlist.updatedAt})"
+    )
+
+
+def warn_if_duplicate_playlists(plex: PlexServer, title: str) -> list:
+    """Prints a warning (to stderr) if more than one playlist shares `title`.
+
+    Returns the list of matching playlists. The warning lists each duplicate's
+    metadata and tells the user how to resolve it (re-run with
+    --remove-duplicates). Does not delete anything.
+    """
+    matches = find_playlists_by_title(plex, title)
+    if len(matches) > 1:
+        print(
+            f'\nWARNING: {len(matches)} playlists named "{title}" exist on the server '
+            f"(Plex keys m3u-imported playlists by m3u file path, not title, so a "
+            f"changed m3u path can create a duplicate):",
+            file=sys.stderr,
+        )
+        for playlist in sorted(matches, key=lambda p: p.addedAt or ""):
+            print(_format_playlist_line(playlist), file=sys.stderr)
+        print(
+            "To remove all but the just-uploaded copy, re-run this command with "
+            "--remove-duplicates.",
+            file=sys.stderr,
+        )
+    return matches
+
+
+def remove_duplicate_playlists(plex: PlexServer, title: str, keep: Playlist) -> list:
+    """Deletes every playlist titled `title` (case-insensitive) EXCEPT `keep`.
+
+    `keep` is identified by ratingKey, so the just-uploaded playlist is always
+    preserved. Returns the list of deleted playlists' ratingKeys. Intended to be
+    run after an upload+reconcile to clean up pre-existing same-named duplicates.
+    """
+    deleted = []
+    for playlist in find_playlists_by_title(plex, title):
+        if playlist.ratingKey == keep.ratingKey:
+            continue
+        playlist.delete()
+        deleted.append(playlist.ratingKey)
+    return deleted
 
 
 def upload_playlist(
@@ -213,7 +415,8 @@ def upload_playlist(
     title: str,
     section: str = None,
     reconcile: bool = True,
-    replace: bool = False,
+    use_cache: bool = True,
+    remove_duplicates: bool = False,
 ) -> Playlist:
     """Uploads an m3u playlist file to Plex, creating a playlist named `title`.
 
@@ -223,10 +426,19 @@ def upload_playlist(
     running this script, and a path that only exists locally here will fail
     with a BadRequest from the server. Music libraries only.
 
-    When `replace` is True, any existing playlist with the same `title` is
-    deleted first, so the upload starts from scratch rather than merging new
-    tracks into (or duplicating) a pre-existing playlist of that name. This is
-    destructive to the old playlist and is off by default.
+    Plex identifies an m3u-imported playlist by the m3u file PATH (not its
+    title), overwriting the playlist previously imported from that same path.
+    Because this tool imports a normalized temp copy at a stable path per source
+    m3u, repeated uploads of the same m3u overwrite the same playlist. But if
+    the m3u path ever changes, Plex creates a NEW playlist with the same title
+    rather than overwriting - leaving same-named duplicates.
+
+    After upload (and reconcile), if more than one playlist shares `title` a
+    warning is printed describing them. When `remove_duplicates` is True, all
+    but the just-uploaded playlist are then deleted (identified by ratingKey, so
+    the fresh upload is always kept). remove_duplicates is off by default
+    because a same-named playlist could be an unrelated (or smart) playlist the
+    user wants to keep.
 
     Before importing, the server's path style is detected from existing tracks
     and a normalized copy of the m3u is written alongside the original (with
@@ -238,14 +450,16 @@ def upload_playlist(
     is compared against the m3u's track list and any tracks the import silently
     dropped - but which do exist in the library - are added via the playlist
     API. See reconcile_playlist for the report shape.
+
+    When `use_cache` is True (default), reconciliation reuses a local cache of
+    the section's track index if one is still valid, avoiding a full re-fetch
+    of the library on repeated runs. Pass use_cache=False to force a fresh
+    fetch (see reconcile_playlist / load_track_cache).
     """
     music_section = plex.library.section(section) if section else _default_music_section(plex)
 
     if not isinstance(music_section, MusicSection):
         raise ValueError(f'Library section "{music_section.title}" is not a music library.')
-
-    if replace and delete_existing_playlist(plex, title):
-        print(f'Removed existing playlist "{title}" before upload.')
 
     style = detect_path_style(music_section)
 
@@ -279,7 +493,9 @@ def upload_playlist(
     )
 
     if reconcile:
-        report = reconcile_playlist(plex, playlist, music_section, expected_paths, style)
+        report = reconcile_playlist(
+            plex, playlist, music_section, expected_paths, style, use_cache=use_cache
+        )
         if report["added"]:
             print(f"Reconciliation added {len(report['added'])} track(s) the import missed.")
         if report["unresolvable"]:
@@ -290,6 +506,18 @@ def upload_playlist(
             )
             for path in report["unresolvable"]:
                 print(f"  - {path}", file=sys.stderr)
+
+    # Detect same-named duplicates (Plex m3u imports are keyed by path, not
+    # title). Optionally clean them up, keeping only this upload.
+    if remove_duplicates:
+        removed = remove_duplicate_playlists(plex, title, keep=playlist)
+        if removed:
+            print(
+                f'Removed {len(removed)} duplicate playlist(s) named "{title}" '
+                f"(kept the just-uploaded one, ratingKey={playlist.ratingKey})."
+            )
+    else:
+        warn_if_duplicate_playlists(plex, title)
 
     return playlist
 
@@ -325,12 +553,24 @@ def parse_args(argv=None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "-x", "--replace",
+        "-D", "--remove-duplicates",
         action="store_true",
         help=(
-            "Delete any existing playlist with the same title before uploading, "
-            "so the playlist starts from scratch instead of merging into or "
-            "duplicating the existing one. Destructive to the old playlist."
+            "After uploading, delete any OTHER playlists sharing this title "
+            "(case-insensitive), keeping only the just-uploaded one. Use this to "
+            "resolve the duplicate-playlist warning. Destructive: a same-named "
+            "playlist you created separately (including a smart playlist) would "
+            "also be deleted, so review the warning's list first."
+        ),
+    )
+    parser.add_argument(
+        "-C", "--no-cache",
+        action="store_true",
+        help=(
+            "Force reconciliation to re-fetch the whole library instead of "
+            "reusing the local section track cache. The cache is validated "
+            "against the server (uuid/updatedAt/track count) and refreshed "
+            "automatically, so this is rarely needed."
         ),
     )
     parser.add_argument(
@@ -400,7 +640,8 @@ def main(argv=None) -> int:
             args.title,
             section=args.section,
             reconcile=not args.no_reconcile,
-            replace=args.replace,
+            use_cache=not args.no_cache,
+            remove_duplicates=args.remove_duplicates,
         )
     except (
         Unauthorized,

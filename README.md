@@ -163,11 +163,15 @@ Key behavior:
 - **Windows server:** drive letters are upper-cased and separators switched to `\`. Matching is case-insensitive.
 - **Linux/POSIX server:** paths are left as-is — POSIX filesystems are case-sensitive, so rewriting case would risk matching the wrong file. Matching is case-sensitive.
 
-**Reconciliation (recovers silently-dropped tracks).** Plex's m3u import gives no per-track feedback and silently skips lines it can't match. After importing, the tool compares the resulting playlist against the m3u's track list, and for any expected track that's missing but *does* exist in the library, adds it via the playlist API. Tracks genuinely not found in the library are reported on stderr. This runs by default; pass `--no-reconcile`/`-R` to skip it. The reconciliation step fetches all tracks in the section once to build a path lookup, which is the slowest/most memory-intensive part on a large library.
+**Reconciliation (recovers silently-dropped tracks).** Plex's m3u import gives no per-track feedback and silently skips lines it can't match. After importing, the tool compares the resulting playlist against the m3u's track list, and for any expected track that's missing but *does* exist in the library, adds it via the playlist API. Tracks genuinely not found in the library are reported on stderr. This runs by default; pass `--no-reconcile`/`-R` to skip it. The reconciliation step fetches all tracks in the section once (paged, with a progress bar) to build a path lookup, which is the slowest part on a large library.
 
-**Replace an existing playlist.** By default, uploading when a playlist of the same name already exists can merge into or duplicate it. Pass `--replace`/`-x` to delete any existing playlist with the same title first, so the upload starts from scratch. This is destructive to the old playlist, so it's off by default.
+**Library track cache.** To avoid re-fetching the whole library on every run, reconciliation caches the section's `path → track` index to `~/.cache/plextools/section_<uuid>.json`. On the next run it reuses the cache only if the section's `uuid`, `updatedAt`, and track count all still match the server — so a cache that's gone stale (tracks added/removed, or the library rescanned) is detected and refreshed automatically. Playlist create/modify/delete does **not** bump a music section's `updatedAt` (verified against a live server), so running this tool repeatedly doesn't invalidate its own cache. Pass `--no-cache`/`-C` to force a fresh fetch and ignore any existing cache.
 
-The helper functions (`detect_path_style`, `write_normalized_m3u`, `reconcile_playlist`, `delete_existing_playlist`) are importable for reuse in other scripts.
+**How Plex identifies the playlist (and why duplicates can appear).** Plex keys an m3u-imported playlist by the **m3u file path**, *not* by the playlist title — re-importing from the same path overwrites that playlist. This tool imports a normalized temp copy written to a stable path per source m3u (`.normalized_<name>.m3u` next to the original), so repeatedly uploading the same m3u overwrites the same playlist as expected. However, if the m3u path ever changes — you rename/move the m3u, or you upgrade the tool in a way that changes the temp filename — Plex no longer recognizes it as the same import and creates a **new** playlist with the same title, leaving same-named duplicates behind.
+
+**Duplicate detection and cleanup.** After uploading (and reconciling), the tool checks for other playlists sharing the title (case-insensitive). If it finds any, it prints a warning listing each duplicate's metadata (ratingKey, item count, added/updated times) so you can decide what to do. To clean them up, re-run with `--remove-duplicates`/`-D`, which deletes every same-named playlist *except* the one just uploaded (identified by its ratingKey). This is **off by default and destructive** — a same-named playlist might be an unrelated or smart playlist you want to keep, so review the warning's list before using it. (The `list_playlists.py` helper prints the same metadata for all playlists if you want to inspect first.)
+
+The helper functions (`detect_path_style`, `write_normalized_m3u`, `reconcile_playlist`, `find_playlists_by_title`, `warn_if_duplicate_playlists`, `remove_duplicate_playlists`, `iter_section_tracks`, `load_track_cache`, `save_track_cache`) are importable for reuse in other scripts.
 
 Full options:
 
@@ -177,7 +181,8 @@ Full options:
 | `--title` | `-t` | Title to give the created playlist in Plex (required). |
 | `--section` | `-s` | Music library section name to import into. Defaults to the server's only music library. |
 | `--no-reconcile` | `-R` | Skip the post-import back-fill of tracks the import silently dropped. |
-| `--replace` | `-x` | Delete any existing playlist with the same title before uploading (destructive). |
+| `--remove-duplicates` | `-D` | After uploading, delete other playlists sharing this title, keeping only the just-uploaded one (destructive). |
+| `--no-cache` | `-C` | Ignore the local library track cache and re-fetch the section fresh. |
 
 (Plus the shared auth flags above: `--url`/`-l`, `--username`/`-u`, `--password`/`-p`, `--credential-file`/`-c`, `--save-creds`/`-S`.)
 
