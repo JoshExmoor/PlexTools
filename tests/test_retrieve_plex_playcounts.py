@@ -6,7 +6,7 @@ import requests
 from plexapi.exceptions import NotFound
 from plexapi.library import MusicSection
 
-import backup_plex_playcounts as bp
+import retrieve_plex_playcounts as bp
 
 
 # ---------------------------------------------------------------------------
@@ -31,10 +31,52 @@ def make_track(title, artist, album, rating, playcount, file_paths):
 
 def make_plex(tracks, as_music=True):
     section = MagicMock(spec=MusicSection) if as_music else MagicMock()
-    section.searchTracks.return_value = tracks
+
+    # Honor container_start/container_size so iter_played_tracks pages correctly
+    # (a plain return_value would hand back the same full list on every call and
+    # loop for lists at/above the page size). The viewCount>=1 filter is passed
+    # on every call; we don't re-filter here since fixtures are all played.
+    def fake_search(viewCount__gte=None, container_start=0, container_size=None, maxresults=None):
+        end = None if container_size is None else container_start + container_size
+        return tracks[container_start:end]
+
+    section.searchTracks.side_effect = fake_search
     plex = MagicMock()
     plex.library.section.return_value = section
     return plex, section
+
+
+# ---------------------------------------------------------------------------
+# iter_played_tracks() - paged fetch
+# ---------------------------------------------------------------------------
+
+def test_iter_played_tracks_pages_through_all(monkeypatch):
+    monkeypatch.setattr(bp, "_TRACK_PAGE_SIZE", 200)
+    tracks = [make_track(f"S{i}", "A", "B", None, 1, [f"/m/{i}.mp3"]) for i in range(450)]
+    plex, section = make_plex(tracks)
+
+    got = list(bp.iter_played_tracks(section))
+
+    assert len(got) == 450
+    offsets = [c.kwargs["container_start"] for c in section.searchTracks.call_args_list]
+    assert offsets == [0, 200, 400]  # partial 3rd page (50) stops the loop
+
+
+def test_iter_played_tracks_handles_exact_multiple(monkeypatch):
+    monkeypatch.setattr(bp, "_TRACK_PAGE_SIZE", 200)
+    tracks = [make_track(f"S{i}", "A", "B", None, 1, [f"/m/{i}.mp3"]) for i in range(400)]
+    plex, section = make_plex(tracks)
+
+    got = list(bp.iter_played_tracks(section))
+
+    assert len(got) == 400
+    offsets = [c.kwargs["container_start"] for c in section.searchTracks.call_args_list]
+    assert offsets == [0, 200, 400]  # empty 3rd page detects the end
+
+
+def test_iter_played_tracks_empty_section():
+    plex, section = make_plex([])
+    assert list(bp.iter_played_tracks(section)) == []
 
 
 # ---------------------------------------------------------------------------
@@ -73,7 +115,22 @@ def test_retrieve_playcounts_filters_by_viewcount_gte_1():
 
     bp.retrieve_plex_playcounts(plex)
 
-    section.searchTracks.assert_called_once_with(viewCount__gte=1)
+    # Every paged searchTracks call must carry the server-side viewCount filter.
+    assert section.searchTracks.call_count >= 1
+    for call in section.searchTracks.call_args_list:
+        assert call.kwargs.get("viewCount__gte") == 1
+
+
+def test_retrieve_playcounts_does_not_pass_libtype_to_search_tracks():
+    # Regression guard (same class as upload_playlist): searchTracks hardcodes
+    # libtype='track' internally, so passing it ourselves would raise.
+    tracks = [make_track("Song", "A", "B", None, 1, ["/x.mp3"])]
+    plex, section = make_plex(tracks)
+
+    bp.retrieve_plex_playcounts(plex)
+
+    for call in section.searchTracks.call_args_list:
+        assert "libtype" not in call.kwargs
 
 
 def test_retrieve_playcounts_defaults_section_to_music():

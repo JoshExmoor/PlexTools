@@ -213,12 +213,12 @@ Full options:
 
 (Plus the shared auth flags above: `--url`/`-l`, `--username`/`-u`, `--password`/`-p`, `--credential-file`/`-c`, `--save-creds`/`-S`.)
 
-### `backup_plex_playcounts.py`
+### `retrieve_plex_playcounts.py`
 
-Backs up the play count (and rating) of every played song in a music library to a JSON file.
+Retrieves the play count (and rating) of every played song in a music library and saves it to a JSON file.
 
 ```powershell
-.\.venv\Scripts\python.exe backup_plex_playcounts.py `
+.\.venv\Scripts\python.exe retrieve_plex_playcounts.py `
   -c creds.json `
   -s "Music" `
   -o "D:\Backups\playcounts.json"
@@ -230,8 +230,9 @@ Key behavior:
 - `--output`/`-o` is **required** — the script always writes to a file you specify.
 - `--section`/`-s` defaults to `"Music"`. Must be a music library; the script errors if the named section isn't one.
 - Only songs with `playcount >= 1` are included (unplayed tracks are skipped).
-- `path` is the file location as the **Plex server** sees it (same caveat as the playlist tools: it may not resolve locally if this script runs on a different machine than the server). Tracks with no resolvable file path are still backed up, with `path` set to `null`, and the count of such tracks is reported on stderr.
-- Note: Plex itself only lets you *reset* a play count or increment it by one play at a time (there's no "set play count to N" in the Plex API), so this backup is best paired with a restore approach that accounts for that limitation.
+- The played tracks are fetched page-by-page with a progress bar (same approach as `upload_playlist.py`), since pulling them from a large library is slow and would otherwise sit silent. The bar shows a live count and rate rather than a percentage (there's no cheap server-side count of only-played tracks to use as a total).
+- `path` is the file location as the **Plex server** sees it (same caveat as the playlist tools: it may not resolve locally if this script runs on a different machine than the server). Tracks with no resolvable file path are still saved, with `path` set to `null`, and the count of such tracks is reported on stderr.
+- Note: Plex itself only lets you *reset* a play count or increment it by one play at a time (there's no "set play count to N" in the Plex API), so this snapshot is best paired with a restore approach that accounts for that limitation.
 
 Full options:
 
@@ -300,14 +301,14 @@ PlexTools/
 ├── push_plex_ratings_by_playlist.py   # Bulk-set star ratings for a playlist's tracks
 ├── upload_playlist.py                 # Import an m3u file into Plex as a new playlist
 ├── retrieve_playlist.py               # Export a Plex playlist to a local m3u file
-├── backup_plex_playcounts.py          # Back up play counts of all played songs to JSON
+├── retrieve_plex_playcounts.py        # Retrieve play counts of all played songs to JSON
 ├── list_playlists.py                  # List, filter, and compare (diff) Plex playlists
 ├── tests/
 │   ├── test_get_plex_credentials.py
 │   ├── test_push_plex_ratings_by_playlist.py
 │   ├── test_upload_playlist.py
 │   ├── test_retrieve_playlist.py
-│   ├── test_backup_plex_playcounts.py
+│   ├── test_retrieve_plex_playcounts.py
 │   └── test_list_playlists.py
 ├── conftest.py                        # Makes project root importable for tests
 ├── requirements.txt

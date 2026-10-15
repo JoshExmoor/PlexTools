@@ -7,8 +7,13 @@ import requests
 from plexapi.exceptions import NotFound, PlexApiException, Unauthorized
 from plexapi.library import MusicSection
 from plexapi.server import PlexServer
+from tqdm import tqdm
 
 from get_plex_credentials import get_plex_credentials, retrieve_plex_credentials, save_plex_credentials
+
+# Number of tracks to request per page. Plex's own default container size is
+# 100; a larger page means fewer round-trips.
+_TRACK_PAGE_SIZE = 200
 
 
 def _first_file_path(track) -> str:
@@ -17,6 +22,35 @@ def _first_file_path(track) -> str:
         if part.file:
             return part.file
     return None
+
+
+def iter_played_tracks(music_section: MusicSection, page_size: int = _TRACK_PAGE_SIZE):
+    """Yields every track in the section with a play count >= 1, one page at a
+    time.
+
+    plexapi's searchTracks() fetches the whole result set in a single blocking
+    call (it pages internally but returns nothing until done), so it can't
+    report progress - which is slow and silent on a large library. This drives
+    the pagination ourselves, requesting one page of `page_size` played tracks
+    per call (the viewCount>=1 filter is applied server-side), and yields each
+    track as its page arrives so a caller can show live progress. Stops when a
+    page comes back empty.
+    """
+    offset = 0
+    while True:
+        page = music_section.searchTracks(
+            viewCount__gte=1,
+            container_start=offset,
+            container_size=page_size,
+            maxresults=page_size,
+        )
+        if not page:
+            break
+        for track in page:
+            yield track
+        if len(page) < page_size:
+            break  # last (partial) page - no need for another round-trip
+        offset += len(page)
 
 
 def retrieve_plex_playcounts(plex: PlexServer, section: str = "Music") -> list:
@@ -30,6 +64,11 @@ def retrieve_plex_playcounts(plex: PlexServer, section: str = "Music") -> list:
         rating     - user rating on Plex's 0-10 scale (None if unrated)
         playcount  - number of times the track has been played (>= 1)
 
+    The played tracks are fetched page-by-page with a progress bar, since
+    pulling them from a large library is slow; the bar shows a live count and
+    rate (there's no cheap server-side count of only-played tracks to use as a
+    percentage total).
+
     NOTE: `path` is the file location as the Plex server sees it, which may not
     resolve locally if this script runs on a different machine than the server.
     """
@@ -38,7 +77,11 @@ def retrieve_plex_playcounts(plex: PlexServer, section: str = "Music") -> list:
         raise ValueError(f'Library section "{section}" is not a music library.')
 
     playcounts = []
-    for track in music_section.searchTracks(viewCount__gte=1):
+    for track in tqdm(
+        iter_played_tracks(music_section),
+        desc="Fetching played tracks",
+        unit="track",
+    ):
         playcounts.append(
             {
                 "path": _first_file_path(track),
@@ -55,7 +98,7 @@ def retrieve_plex_playcounts(plex: PlexServer, section: str = "Music") -> list:
 
 def parse_args(argv=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Back up Plex play counts for all played songs to a JSON file.",
+        description="Retrieve Plex play counts for all played songs and save them to a JSON file.",
     )
     parser.add_argument(
         "-o", "--output",
