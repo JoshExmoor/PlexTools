@@ -13,23 +13,10 @@ from plexapi.server import PlexServer
 from tqdm import tqdm
 
 from get_plex_credentials import get_plex_credentials, retrieve_plex_credentials, save_plex_credentials
+from plex_sections import default_music_section as _default_music_section, resolve_music_section
 
 # A Windows-style path starts with a drive letter, e.g. "E:\..." or "e:/...".
 _WINDOWS_PATH_RE = re.compile(r"^[A-Za-z]:[\\/]")
-
-
-def _default_music_section(plex: PlexServer) -> MusicSection:
-    """Returns the first music library section, used when --section is not given."""
-    music_sections = [s for s in plex.library.sections() if isinstance(s, MusicSection)]
-    if not music_sections:
-        raise ValueError("No music library section found on this Plex server.")
-    if len(music_sections) > 1:
-        names = ", ".join(s.title for s in music_sections)
-        raise ValueError(
-            f"Multiple music library sections found ({names}). "
-            "Specify which one to use with --section."
-        )
-    return music_sections[0]
 
 
 def _iter_track_file_paths(track):
@@ -456,10 +443,7 @@ def upload_playlist(
     of the library on repeated runs. Pass use_cache=False to force a fresh
     fetch (see reconcile_playlist / load_track_cache).
     """
-    music_section = plex.library.section(section) if section else _default_music_section(plex)
-
-    if not isinstance(music_section, MusicSection):
-        raise ValueError(f'Library section "{music_section.title}" is not a music library.')
+    music_section = resolve_music_section(plex, section)
 
     style = detect_path_style(music_section)
 

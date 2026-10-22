@@ -43,6 +43,9 @@ def make_plex(tracks, as_music=True):
     section.searchTracks.side_effect = fake_search
     plex = MagicMock()
     plex.library.section.return_value = section
+    # Default (no --section) path resolves via sections(); expose this section
+    # as the server's single music library when it is one.
+    plex.library.sections.return_value = [section] if as_music else []
     return plex, section
 
 
@@ -133,12 +136,15 @@ def test_retrieve_playcounts_does_not_pass_libtype_to_search_tracks():
         assert "libtype" not in call.kwargs
 
 
-def test_retrieve_playcounts_defaults_section_to_music():
-    plex, _ = make_plex([])
+def test_retrieve_playcounts_defaults_to_servers_only_music_section():
+    # With no --section, resolution falls back to the server's single music
+    # library via sections(), not a hardcoded "Music" lookup.
+    plex, section = make_plex([])
 
     bp.retrieve_plex_playcounts(plex)
 
-    plex.library.section.assert_called_once_with("Music")
+    plex.library.section.assert_not_called()
+    plex.library.sections.assert_called_once()
 
 
 def test_retrieve_playcounts_rejects_non_music_section():
@@ -202,9 +208,9 @@ def test_parse_args_allows_credential_file_without_url():
     assert args.url is None
 
 
-def test_parse_args_section_defaults_to_music():
+def test_parse_args_section_defaults_to_none():
     args = bp.parse_args(["--output", "out.json", "--url", "http://localhost:32400"])
-    assert args.section == "Music"
+    assert args.section is None
 
 
 def test_parse_args_short_flags():

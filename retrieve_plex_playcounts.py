@@ -10,6 +10,7 @@ from plexapi.server import PlexServer
 from tqdm import tqdm
 
 from get_plex_credentials import get_plex_credentials, retrieve_plex_credentials, save_plex_credentials
+from plex_sections import resolve_music_section
 
 # Number of tracks to request per page. Plex's own default container size is
 # 100; a larger page means fewer round-trips.
@@ -53,7 +54,7 @@ def iter_played_tracks(music_section: MusicSection, page_size: int = _TRACK_PAGE
         offset += len(page)
 
 
-def retrieve_plex_playcounts(plex: PlexServer, section: str = "Music") -> list:
+def retrieve_plex_playcounts(plex: PlexServer, section: str = None) -> list:
     """Retrieves all songs with a play count >= 1 from the given music section.
 
     Returns a list of dicts, one per played track, each containing:
@@ -69,12 +70,13 @@ def retrieve_plex_playcounts(plex: PlexServer, section: str = "Music") -> list:
     rate (there's no cheap server-side count of only-played tracks to use as a
     percentage total).
 
+    If `section` is None (the default), the server's single music library is
+    used; pass a name to pick one out of a server with several.
+
     NOTE: `path` is the file location as the Plex server sees it, which may not
     resolve locally if this script runs on a different machine than the server.
     """
-    music_section = plex.library.section(section)
-    if not isinstance(music_section, MusicSection):
-        raise ValueError(f'Library section "{section}" is not a music library.')
+    music_section = resolve_music_section(plex, section)
 
     playcounts = []
     for track in tqdm(
@@ -107,8 +109,8 @@ def parse_args(argv=None) -> argparse.Namespace:
     )
     parser.add_argument(
         "-s", "--section",
-        default="Music",
-        help="Music library section name to read from (default: 'Music').",
+        default=None,
+        help="Music library section name to read from. Defaults to the server's only music library.",
     )
     parser.add_argument(
         "-l", "--url",
