@@ -6,3 +6,6 @@ __pycache__/
 # Credential cache files contain live Plex auth tokens - never commit these.
 *creds*.json
 *credential*.json
+
+# Workflow plans, reviews, and scratch backups from the coding agent.
+.agents/
