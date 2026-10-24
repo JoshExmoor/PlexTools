@@ -81,8 +81,6 @@ Album mode (``--merge albums``):
 
 import argparse
 import difflib
-import ntpath
-import posixpath
 import re
 import sys
 import unicodedata
@@ -95,6 +93,18 @@ from plexapi.server import PlexServer
 from tqdm import tqdm
 
 from get_plex_credentials import get_plex_credentials, retrieve_plex_credentials, save_plex_credentials
+from plex_common import (  # noqa: F401 - re-exported under the names this module always used
+    DRIVE_LETTER as _DRIVE_LETTER,
+    MAX_FOLDERS_SHOWN as _MAX_FOLDERS_SHOWN,
+    album_year as _album_year,
+    ask_yes_no,
+    attr as _attr,
+    dedupe_folders as _dedupe_folders,
+    folder_key as _folder_key,
+    is_windows_path as _is_windows_path,
+    same_folders as _same_folders,
+    server_dirname as _server_dirname,
+)
 from plex_sections import resolve_music_section
 
 # Number of items to request per page when scanning artists/albums.
@@ -102,18 +112,6 @@ _PAGE_SIZE = 200
 
 # Default similarity (0-1) for treating two normalized names as the same.
 DEFAULT_THRESHOLD = 0.90
-
-
-def _attr(obj, name):
-    """Returns getattr(obj, name), or None if the attribute is absent.
-
-    Items returned from a paginated search come back as "partial" objects:
-    Plex's list view omits attributes that aren't set, and plexapi's
-    auto-reload is disabled on searched items, so a missing attribute raises
-    AttributeError instead of yielding None. Reading through this helper
-    treats "absent" as None.
-    """
-    return getattr(obj, name, None)
 
 
 @dataclass
@@ -377,17 +375,6 @@ def find_artist_candidates(
     return group_candidates(scan_artists(music_section, artist=artist), threshold=threshold, fuzzy=fuzzy)
 
 
-def _album_year(album):
-    """Returns the album's year, else its release date's year, else None."""
-    year = _attr(album, "year")
-    if year:
-        return year
-    released = _attr(album, "originallyAvailableAt")
-    if released is not None:
-        return _attr(released, "year")
-    return None
-
-
 def iter_albums(music_section: MusicSection, artist: str = None, album: str = None, page_size: int = None):
     """Yields every album in the section, optionally filtered.
 
@@ -429,52 +416,6 @@ def scan_albums(music_section: MusicSection, artist: str = None, album: str = No
             year=_album_year(obj),
         ))
     return entries
-
-
-_DRIVE_LETTER = re.compile(r"^[A-Za-z]:")
-
-
-def _is_windows_path(path: str) -> bool:
-    """True for Windows-style server paths (a backslash or a leading drive letter like "E:")."""
-    return "\\" in path or bool(_DRIVE_LETTER.match(path))
-
-
-def _server_dirname(path: str) -> str:
-    """Returns the directory of a path as reported by the Plex server.
-
-    The server's OS may differ from this machine's, so Windows-style paths
-    (see _is_windows_path) use ntpath and everything else uses posixpath.
-    """
-    return ntpath.dirname(path) if _is_windows_path(path) else posixpath.dirname(path)
-
-
-def _folder_key(path: str) -> str:
-    """Returns the comparison key for a server folder path.
-
-    Windows-style paths are case-insensitive and accept either separator, so
-    they go through ntpath.normcase (lowercase, "/" -> "\\"). POSIX paths are
-    case-sensitive and compared as-is. Trailing separators are ignored.
-    """
-    if _is_windows_path(path):
-        return ntpath.normcase(path).rstrip("\\") or path
-    return path.rstrip("/") or path
-
-
-def _dedupe_folders(directories) -> list:
-    """Returns the distinct folders (by _folder_key), sorted.
-
-    The first-seen original string is kept for each key, so folders are
-    displayed exactly as Plex reports them.
-    """
-    seen = {}
-    for directory in directories:
-        seen.setdefault(_folder_key(directory), directory)
-    return sorted(seen.values())
-
-
-def _same_folders(a, b) -> bool:
-    """True when two folder lists name the same folders (see _folder_key)."""
-    return {_folder_key(d) for d in a} == {_folder_key(d) for d in b}
 
 
 def album_directories(album_obj) -> tuple:
@@ -536,22 +477,6 @@ def format_prompt(target: MergeEntry, other: MergeEntry) -> str:
         f"Would you like to merge {target.title} ({target.album_count} albums) "
         f"with {other.title} ({other.album_count} albums)? "
     )
-
-
-def ask_yes_no(prompt: str, input_fn=None) -> bool:
-    """Asks `prompt` until the answer is yes or no; Enter alone means no.
-
-    `input_fn` defaults to the built-in input(), looked up at call time.
-    EOFError and KeyboardInterrupt propagate to the caller.
-    """
-    input_fn = input_fn or input
-    while True:
-        answer = input_fn(prompt).strip().lower()
-        if answer in ("y", "yes"):
-            return True
-        if answer in ("", "n", "no"):
-            return False
-        print("Please answer y or n.")
 
 
 def merge_entry(target: MergeEntry, other: MergeEntry) -> None:
@@ -621,10 +546,6 @@ def format_album_prompt(target: MergeEntry, other: MergeEntry) -> str:
     """
     tag = _FOLDER_TAGS[folder_status(target, other)]
     return f"Would you like to merge {_album_label(target)} with {_album_label(other)}? {tag} "
-
-
-# Most folders listed per album before collapsing into "... and N more".
-_MAX_FOLDERS_SHOWN = 5
 
 
 def _folder_list_lines(directories) -> list:
