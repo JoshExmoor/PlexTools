@@ -157,20 +157,48 @@ def test_reset_turns_both_off():
 # configure(): Windows / colorama
 # ---------------------------------------------------------------------------
 
+class Recorder:
+    """A stand-in console method that records calls and returns (or raises) a fixed result."""
+
+    def __init__(self, result=True, raises=None):
+        self.result = result
+        self.raises = raises
+        self.calls = 0
+
+    def __call__(self):
+        self.calls += 1
+        if self.raises:
+            raise self.raises
+        return self.result
+
+
 @pytest.fixture
 def windows(monkeypatch):
+    """Pretend to be on Windows with native VT and colorama.init() both failing (override per test)."""
     monkeypatch.setattr(plex_style, "_IS_WINDOWS", True)
-    monkeypatch.setattr(plex_style, "_console_fixed", False)
+    native = Recorder(False)
+    init = Recorder(False)
+    monkeypatch.setattr(plex_style, "_enable_native_vt", native)
+    monkeypatch.setattr(plex_style, "_colorama_init", init)
+    return types.SimpleNamespace(native=native, init=init)
 
 
-def fake_colorama(monkeypatch):
+def fake_colorama(monkeypatch, just_fix=True):
+    """Installs a fake colorama; just_fix=False mimics colorama < 0.4.6 (no just_fix_windows_console)."""
     module = types.ModuleType("colorama")
+    module.__version__ = "0.4.6" if just_fix else "0.4.4"
     module.calls = 0
+    module.init_calls = 0
 
     def just_fix_windows_console():
         module.calls += 1
 
-    module.just_fix_windows_console = just_fix_windows_console
+    def init():
+        module.init_calls += 1
+
+    if just_fix:
+        module.just_fix_windows_console = just_fix_windows_console
+    module.init = init
     monkeypatch.setitem(sys.modules, "colorama", module)
     return module
 
@@ -212,6 +240,141 @@ def test_windows_force_color_without_colorama_stays_on(windows, monkeypatch):
 def test_windows_fix_failure_is_not_cached(windows, monkeypatch):
     monkeypatch.setattr(plex_style, "_fix_windows_console", lambda: False)
     assert configure() is False
+
+
+def test_windows_new_colorama_is_used_first(windows, monkeypatch):
+    fake_colorama(monkeypatch)
+    assert configure() is True
+    assert plex_style._console_method == "colorama"
+    assert windows.native.calls == 0 and windows.init.calls == 0
+
+
+def test_windows_old_colorama_falls_back_to_native_vt(windows, monkeypatch):
+    # Regression: colorama < 0.4.6 has no just_fix_windows_console, which used to turn color off.
+    module = fake_colorama(monkeypatch, just_fix=False)
+    windows.native.result = True
+    assert configure() is True
+    assert plex_style.is_enabled(err=True)
+    assert plex_style._console_method == "native VT"
+    assert windows.native.calls == 1 and windows.init.calls == 0
+    assert module.init_calls == 0
+
+
+def test_windows_without_colorama_uses_native_vt(windows, monkeypatch):
+    monkeypatch.setitem(sys.modules, "colorama", None)
+    windows.native.result = True
+    assert configure() is True
+    assert plex_style._console_method == "native VT"
+
+
+def test_windows_colorama_init_is_last_resort(windows, monkeypatch):
+    fake_colorama(monkeypatch, just_fix=False)
+    windows.init.result = True
+    assert configure() is True
+    assert plex_style._console_method == "colorama.init"
+    assert windows.native.calls == 1 and windows.init.calls == 1
+
+
+def test_windows_all_methods_fail_turns_color_off(windows, monkeypatch):
+    fake_colorama(monkeypatch, just_fix=False)
+    assert configure() is False
+    assert not plex_style.is_enabled(err=True)
+    assert plex_style._console_method == "none"
+    assert configure(env={"FORCE_COLOR": "1"}) is True
+
+
+def test_windows_failure_is_retried_next_time(windows, monkeypatch):
+    monkeypatch.setitem(sys.modules, "colorama", None)
+    assert configure() is False
+    windows.native.result = True
+    assert configure() is True
+    assert windows.native.calls == 2
+
+
+def test_windows_exceptions_from_every_method_are_swallowed(windows, monkeypatch):
+    module = fake_colorama(monkeypatch)
+
+    def broken():
+        raise RuntimeError("boom")
+
+    module.just_fix_windows_console = broken
+    windows.native.raises = OSError("no kernel32")
+    windows.init.raises = ValueError("bad stream")
+    assert configure() is False
+    assert windows.native.calls == 1 and windows.init.calls == 1
+
+
+def test_windows_success_is_cached(windows, monkeypatch):
+    monkeypatch.setitem(sys.modules, "colorama", None)
+    windows.native.result = True
+    configure()
+    configure()
+    configure()
+    assert windows.native.calls == 1
+
+
+def test_non_windows_never_attempts_a_fix(posix, monkeypatch):
+    native, init, just_fix = Recorder(), Recorder(), Recorder()
+    monkeypatch.setattr(plex_style, "_enable_native_vt", native)
+    monkeypatch.setattr(plex_style, "_colorama_init", init)
+    monkeypatch.setattr(plex_style, "_colorama_just_fix", just_fix)
+    assert configure() is True
+    assert configure(stdout=FakeTTY(False), stderr=FakeTTY(False)) is False
+    assert native.calls == init.calls == just_fix.calls == 0
+    assert plex_style._console_method == ""
+
+
+def test_colorama_init_skipped_without_a_real_terminal(monkeypatch):
+    module = fake_colorama(monkeypatch, just_fix=False)
+    monkeypatch.setattr(sys, "stdout", FakeTTY(False))
+    monkeypatch.setattr(sys, "stderr", FakeTTY(False))
+    assert plex_style._colorama_init() is False
+    assert module.init_calls == 0
+
+
+def test_colorama_init_used_for_a_real_terminal(monkeypatch):
+    module = fake_colorama(monkeypatch, just_fix=False)
+    monkeypatch.setattr(sys, "stdout", FakeTTY(True))
+    assert plex_style._colorama_init() is True
+    assert module.init_calls == 1
+
+
+def test_colorama_just_fix_reports_old_or_missing_colorama(monkeypatch):
+    fake_colorama(monkeypatch, just_fix=False)
+    assert plex_style._colorama_just_fix() is False
+    monkeypatch.setitem(sys.modules, "colorama", None)
+    assert plex_style._colorama_just_fix() is False
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="checks the non-Windows failure path")
+def test_native_vt_fails_quietly_off_windows():
+    assert plex_style._enable_native_vt() is False
+
+
+# ---------------------------------------------------------------------------
+# diagnose()
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("is_windows", [True, False])
+def test_diagnose_runs(monkeypatch, capsys, is_windows):
+    monkeypatch.setattr(plex_style, "_IS_WINDOWS", is_windows)
+    monkeypatch.setattr(plex_style, "_enable_native_vt", Recorder(False))
+    monkeypatch.setattr(plex_style, "_colorama_init", Recorder(False))
+    fake_colorama(monkeypatch, just_fix=False)
+    plex_style.diagnose()
+    out = capsys.readouterr().out
+    assert sys.executable in out
+    assert "0.4.4 (just_fix_windows_console: no)" in out
+    assert "Console method:" in out
+    for role in plex_style.STYLES:
+        assert f"Sample text for {role}" in out
+
+
+def test_diagnose_without_colorama(monkeypatch, capsys):
+    monkeypatch.setitem(sys.modules, "colorama", None)
+    monkeypatch.setattr(plex_style, "_IS_WINDOWS", False)
+    plex_style.diagnose()
+    assert "not installed" in capsys.readouterr().out
 
 
 # ---------------------------------------------------------------------------

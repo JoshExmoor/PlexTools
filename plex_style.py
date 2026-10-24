@@ -22,10 +22,18 @@ to stderr). For each stream, the first matching rule wins:
 6. otherwise -> on
 
 The codes are plain ANSI SGR sequences, which Linux and macOS terminals
-understand natively. On Windows, colorama's ``just_fix_windows_console()`` is
-called once (only when color would be on) so Windows Terminal, PowerShell and
-the legacy console all render them; if colorama is missing or fails, color
-stays off unless FORCE_COLOR is set. colorama is optional.
+understand natively. On Windows, the console is set up once (only when color
+would be on), trying each method in turn until one works:
+
+1. colorama >= 0.4.6: ``colorama.just_fix_windows_console()``.
+2. Native VT: switch the console handles to ANSI mode with
+   ``SetConsoleMode(ENABLE_VIRTUAL_TERMINAL_PROCESSING)`` via ctypes (Windows
+   10 1511+, Windows Terminal, PowerShell 7), so no colorama is needed.
+3. Older colorama: ``colorama.init()``, which wraps sys.stdout/sys.stderr and
+   translates the codes (legacy consoles), used only for a real console.
+
+colorama is optional. If every method fails, color stays off unless
+FORCE_COLOR is set. Run ``python plex_style.py`` to see which method works.
 
 Rules for callers: every wrapper returns ``CODE + text + RESET``, so never
 pass wrapped text into another wrapper (compose by concatenation instead),
@@ -68,6 +76,11 @@ _IS_WINDOWS = os.name == "nt"
 
 _enabled = {"out": False, "err": False}
 _console_fixed = False
+# Which Windows console method worked: "colorama", "native VT", "colorama.init",
+# "none" (all failed) or "" (not attempted).
+_console_method = ""
+
+_ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
 
 
 def _forced(env) -> bool:
@@ -94,19 +107,95 @@ def _stream_on(stream, no_color: bool, env) -> bool:
         return False
 
 
-def _fix_windows_console() -> bool:
-    """Enables ANSI codes on the Windows console via colorama, once. False if unavailable."""
-    global _console_fixed
-    if _console_fixed:
-        return True
+def _colorama_just_fix() -> bool:
+    """colorama >= 0.4.6: just_fix_windows_console(). False if colorama is missing or older."""
     try:
         import colorama
 
-        colorama.just_fix_windows_console()
-    except Exception:  # noqa: BLE001 - colorama missing or failing means no color
+        fix = getattr(colorama, "just_fix_windows_console", None)
+        if fix is None:
+            return False
+        fix()
+    except Exception:  # noqa: BLE001 - missing or failing colorama just means try the next method
         return False
-    _console_fixed = True
     return True
+
+
+def _enable_native_vt() -> bool:
+    """Turns on ANSI (VT) processing for the stdout/stderr console handles via ctypes.
+
+    True if at least one handle is a console that now has (or already had) VT
+    mode. Windows only; never called elsewhere.
+    """
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.GetStdHandle.restype = wintypes.HANDLE
+        kernel32.GetStdHandle.argtypes = [wintypes.DWORD]
+        kernel32.GetConsoleMode.restype = wintypes.BOOL
+        kernel32.GetConsoleMode.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+        kernel32.SetConsoleMode.restype = wintypes.BOOL
+        kernel32.SetConsoleMode.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+        enabled = False
+        for std_handle in (-11, -12):  # STD_OUTPUT_HANDLE, STD_ERROR_HANDLE
+            handle = kernel32.GetStdHandle(wintypes.DWORD(std_handle & 0xFFFFFFFF))
+            mode = wintypes.DWORD()
+            if not handle or not kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+                continue  # not a console (redirected) or no handle
+            if mode.value & _ENABLE_VIRTUAL_TERMINAL_PROCESSING:
+                enabled = True
+            elif kernel32.SetConsoleMode(handle, mode.value | _ENABLE_VIRTUAL_TERMINAL_PROCESSING):
+                enabled = True
+        return enabled
+    except Exception:  # noqa: BLE001 - no ctypes/kernel32 means try the next method
+        return False
+
+
+def _colorama_init() -> bool:
+    """Older colorama: init() wraps sys.stdout/sys.stderr to translate ANSI codes.
+
+    Only used for a real console: init() replaces the sys streams, so it is
+    skipped when neither is a terminal (pytest capture, pipes).
+    """
+    try:
+        if not any(_stream_on(s, False, {}) for s in (sys.stdout, sys.stderr)):
+            return False
+        import colorama
+
+        colorama.init()
+    except Exception:  # noqa: BLE001 - missing or failing colorama means no color
+        return False
+    return True
+
+
+# (name reported by diagnose(), function name), tried in order. Functions are
+# looked up by name at call time so tests can monkeypatch them.
+_CONSOLE_METHODS = (
+    ("colorama", "_colorama_just_fix"),
+    ("native VT", "_enable_native_vt"),
+    ("colorama.init", "_colorama_init"),
+)
+
+
+def _fix_windows_console() -> bool:
+    """Makes the Windows console render ANSI codes, once; False if no method works.
+
+    Records the method that worked in _console_method (see the module docstring).
+    """
+    global _console_fixed, _console_method
+    if _console_fixed:
+        return True
+    for name, func_name in _CONSOLE_METHODS:
+        try:
+            if globals()[func_name]():
+                _console_fixed, _console_method = True, name
+                return True
+        except Exception:  # noqa: BLE001 - a failing method just means try the next
+            continue
+    _console_method = "none"
+    return False
 
 
 def configure(no_color: bool = False, env=None, stdout=None, stderr=None) -> bool:
@@ -201,3 +290,38 @@ def input_prompt(text: str) -> str:
     if not _enabled["out"] or "readline" not in sys.modules:
         return text
     return _SGR.sub(lambda m: f"\x01{m.group(0)}\x02", text)
+
+
+def diagnose() -> None:
+    """Prints why color is on or off on this machine (run ``python plex_style.py``)."""
+    try:
+        import colorama
+
+        colorama_info = getattr(colorama, "__version__", "unknown version")
+        has_fix = hasattr(colorama, "just_fix_windows_console")
+    except Exception:  # noqa: BLE001 - report any import failure as not installed
+        colorama_info, has_fix = "not installed", False
+
+    def tty(stream):
+        return _stream_on(stream, False, {})
+
+    print(f"Python:            {sys.executable}")
+    print(f"colorama:          {colorama_info} (just_fix_windows_console: {'yes' if has_fix else 'no'})")
+    print(f"stdout is a TTY:   {tty(sys.stdout)}")
+    print(f"stderr is a TTY:   {tty(sys.stderr)}")
+    for name in ("NO_COLOR", "FORCE_COLOR", "TERM"):
+        print(f"{name + ':':<19}{os.environ.get(name, '(unset)')!r}")
+    configure()
+    if not _IS_WINDOWS:
+        method = "not needed (not Windows)"
+    else:
+        method = _console_method or "not attempted (color off before the console check)"
+    print(f"Console method:    {method}")
+    print(f"Color on stdout:   {is_enabled()}")
+    print(f"Color on stderr:   {is_enabled(err=True)}")
+    for role in STYLES:
+        print(f"  {role:<7} {paint(role, 'Sample text for ' + role)}")
+
+
+if __name__ == "__main__":
+    diagnose()
