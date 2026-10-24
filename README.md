@@ -2,6 +2,27 @@
 
 A growing collection of command-line tools built on [python-plexapi](https://python-plexapi.readthedocs.io/) for managing a Plex Media Server.
 
+# Overview
+
+**Scripts**
+
+- **`get_plex_credentials.py`** — Logs in to Plex and retrieves a server auth token, caching it so later runs skip the login. Every other script uses it for authentication.
+- **`push_plex_ratings_by_playlist.py`** — Sets a star rating on every track in a Plex playlist. Supports a dry run and backing up the current ratings first.
+- **`upload_playlist.py`** — Imports an m3u playlist file into a Plex music library as a playlist. Afterwards it adds back any tracks Plex's import silently dropped, and can clean up duplicate playlists with the same title.
+- **`retrieve_playlist.py`** — Exports a Plex playlist by name to a local m3u file, built from each track's file path on the server.
+- **`list_playlists.py`** — Lists, filters, and compares Plex playlists, flagging duplicate titles and diffing two playlists' tracks. Read-only.
+- **`retrieve_plex_playcounts.py`** — Saves the play count and rating of every played song in a music library to a JSON file.
+- **`retrieve_plex_library.py`** — Exports every track in a music library to JSON as a flat record with its artist/album details, ratings, play/skip counts, tags, and file technical data. Can be narrowed with `--search`, `--artist`, or `--album`.
+- **`plex_merge_tool.py`** — Finds artists, or albums, that Plex split into several entries and merges them after you confirm each one. Albums only match on the same artist and the same exact title, and each prompt shows the year, track count, and whether the albums share a folder.
+- **`plex_split_tool.py`** — Finds albums whose tracks come from more than one album folder (ignoring disc subfolders like `CD1`/`Disc 2`) and splits them with Plex's split action. It's a dry run by default; `--apply` asks you to confirm each split, then reports where Plex put the tracks.
+
+**Shared modules** (imported by the scripts, not run directly)
+
+- **`plex_sections.py`** — Picks the music library to use: the one named with `--section`, otherwise the server's only music library.
+- **`plex_common.py`** — Path, folder-comparison, yes/no prompt, and attribute helpers shared by the merge and split tools.
+- **`plex_style.py`** — Terminal colors for the merge and split tools' prompts. Turned off automatically when output isn't a terminal, when `NO_COLOR` is set, or with `--no-color`.
+
+
 ## Setup
 
 This project uses a Python virtual environment at `.venv`. **Every command below — installing dependencies and running scripts — must use that same environment.** Mixing a venv install with a global-Python run (or vice versa) is the most common source of confusing "but it says it's installed!" errors with this project; see the troubleshooting note at the end of this section if you hit that.
