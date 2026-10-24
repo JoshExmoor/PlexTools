@@ -10,6 +10,8 @@ import ntpath
 import posixpath
 import re
 
+import plex_style as style
+
 # Most folders listed per album before collapsing into "... and N more".
 MAX_FOLDERS_SHOWN = 5
 
@@ -91,9 +93,9 @@ def ask_yes_no(prompt: str, input_fn=None) -> bool:
     """
     input_fn = input_fn or input
     while True:
-        answer = input_fn(prompt).strip().lower()
+        answer = input_fn(style.input_prompt(prompt)).strip().lower()
         if answer in ("y", "yes"):
             return True
         if answer in ("", "n", "no"):
             return False
-        print("Please answer y or n.")
+        print(style.warn("Please answer y or n."))

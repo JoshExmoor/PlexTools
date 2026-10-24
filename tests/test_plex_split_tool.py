@@ -673,3 +673,171 @@ def test_main_skips_login_with_credential_file(monkeypatch, tmp_path):
     monkeypatch.setattr(ps, "PlexServer", lambda url, token: make_plex(section))
 
     assert ps.main(["-c", str(creds_path)]) == 0
+
+
+# ---------------------------------------------------------------------------
+# Colors (display only)
+# ---------------------------------------------------------------------------
+
+import plex_style  # noqa: E402
+
+CYAN, BOLD, YELLOW, GREEN, DIM, RED, RESET = (
+    "\x1b[36m", "\x1b[1m", "\x1b[33m", "\x1b[32m", "\x1b[2m", "\x1b[31m", "\x1b[0m",
+)
+
+
+def plain_and_colored(fn, *args):
+    plex_style.reset()
+    plain = fn(*args)
+    plex_style.enable()
+    return plain, fn(*args)
+
+
+def sample_candidate(**kwargs):
+    return candidate_with_roots([
+        ps.AlbumRoot("a", "E:\\SP\\Siamese Dream", 13, ["E:\\SP\\Siamese Dream"]),
+        ps.AlbumRoot("b", "E:\\SP\\Mellon", 13, ["E:\\SP\\Mellon\\CD1", "E:\\SP\\Mellon\\CD2"]),
+    ], **kwargs)
+
+
+def test_color_split_prompt():
+    plain, colored = plain_and_colored(ps.format_split_prompt, sample_candidate())
+    assert plain == "Would you like to split Siamese Dream by Smashing Pumpkins (26 tracks across 2 folders)? "
+    assert f"{BOLD}Siamese Dream{RESET} by {CYAN}Smashing Pumpkins{RESET}" in colored
+    assert f"({GREEN}26 tracks{RESET} across {GREEN}2 folders{RESET})? " in colored
+    assert colored.endswith(f"{RESET})? ")
+    assert plex_style.strip(colored) == plain
+
+
+def test_color_describe_candidate():
+    plain, colored = plain_and_colored(ps.describe_candidate, sample_candidate(pathless_tracks=2, load_error="boom"))
+    assert colored[0] == f"  ratingKey {DIM}12345{RESET}, {YELLOW}1993{RESET}"
+    assert colored[2] == f"  {DIM}E:\\SP\\Mellon{RESET} ({GREEN}13 tracks{RESET} in {GREEN}2 disc folders{RESET})"
+    assert any(line.startswith(f"  {YELLOW}Note:{RESET} {GREEN}2{RESET} track(s)") for line in colored)
+    assert f"  {RED}Note:{RESET} could not load this album from Plex: boom" in colored
+    assert [plex_style.strip(line) for line in colored] == plain
+
+
+def test_color_root_display_stays_raw():
+    candidate = sample_candidate()
+    plex_style.enable()
+    ps.describe_candidate(candidate)
+    assert [r.display for r in candidate.roots] == ["E:\\SP\\Siamese Dream", "E:\\SP\\Mellon"]
+
+
+def report_out(capsys, color, section_fn, keys):
+    if color:
+        plex_style.enable()
+    else:
+        plex_style.reset()
+    result = ps.report_split(section_fn(), report_candidate(keys))
+    return result, capsys.readouterr().out
+
+
+@pytest.mark.parametrize("after, keys, expected", [
+    ({1: (100, "T"), 2: (200, "T2")}, [1, 2, 3], f"{GREEN}Split requested. Plex now lists these tracks under:{RESET}"),
+    ({1: (100, "T"), 2: (100, "T")}, [1, 2], f"{YELLOW}Plex did not divide this album:{RESET}"),
+    ({}, [1, 2], f"{YELLOW}Split requested. None of the album's 2 tracks could be found yet.{RESET}"),
+])
+def test_color_report_split(capsys, after, keys, expected):
+    section_fn = lambda: make_section([], after_split=after)  # noqa: E731
+    plain_result, plain = report_out(capsys, False, section_fn, keys)
+    result, colored = report_out(capsys, True, section_fn, keys)
+
+    assert result == plain_result
+    assert expected in colored
+    assert plex_style.strip(colored) == plain
+
+
+def test_color_report_split_original_tag_and_missing_note(capsys):
+    section_fn = lambda: make_section([], after_split={1: (100, "T"), 2: (200, "T2")})  # noqa: E731
+    _, colored = report_out(capsys, True, section_fn, [1, 2, 3])
+    assert f'  ratingKey {DIM}100{RESET} "{BOLD}T{RESET}" ({GREEN}1 track{RESET}) {DIM}[original]{RESET}' in colored
+    assert f"  {YELLOW}Note:{RESET} {GREEN}1{RESET} track(s) could not be found after the split." in colored
+
+
+def run_split_review(capsys, color, answers):
+    if color:
+        plex_style.enable()
+    else:
+        plex_style.reset()
+    after = {k: (100, "Siamese Dream") for k in (100000, 100001)}
+    after.update({k: (300, "Siamese Dream (Reissue)") for k in (100002, 100003)})
+    section, _ = siamese_section(after_split=after)
+    fake = scripted_input(answers)
+    summary = ps.run_split_tool(make_plex(section), apply=True, input_fn=fake)
+    return summary, fake.prompts, capsys.readouterr().out
+
+
+def test_color_review_and_split(capsys):
+    plain_summary, plain_prompts, plain_out = run_split_review(capsys, False, ["y"])
+    summary, prompts, out = run_split_review(capsys, True, ["y"])
+
+    assert summary == plain_summary
+    assert f"{YELLOW}Note: {ps.SPLIT_CAVEAT}{RESET}" in out
+    assert f'"{BOLD}Siamese Dream{RESET}" by {CYAN}Smashing Pumpkins{RESET}' in out
+    assert f"Summary: {GREEN}1{RESET} split" in out
+    assert "\x1b" in prompts[0]
+    assert [plex_style.strip(p) for p in prompts] == plain_prompts
+    assert plex_style.strip(out) == plain_out
+
+
+def test_color_summary_unchanged_count_is_yellow(capsys):
+    plex_style.enable()
+    section, _ = siamese_section(after_split={k: (100, "Siamese Dream") for k in range(100000, 100004)})
+    ps.run_split_tool(make_plex(section), apply=True, input_fn=scripted_input(["y"]))
+    assert f"{YELLOW}1{RESET} unchanged" in capsys.readouterr().out
+
+
+def test_color_cannot_split_is_red(capsys):
+    plex_style.enable()
+    section, albums = two_candidates()
+    albums[1] = requests.exceptions.ConnectionError("down")
+    ps.run_split_tool(make_plex(section), apply=True, input_fn=scripted_input(["n"]))
+    out = capsys.readouterr().out
+    assert f"{RED}Cannot split: album could not be loaded.{RESET}" in out
+    assert f"{RED}1{RESET} failed." in out
+
+
+@pytest.mark.parametrize("argv, expected", [([], False), (["--no-color"], True)])
+def test_parse_args_no_color(argv, expected):
+    assert ps.parse_args(URL_ARGS + argv).no_color is expected
+
+
+def test_help_mentions_no_color(capsys):
+    with pytest.raises(SystemExit):
+        ps.parse_args(["--help"])
+    out = capsys.readouterr().out
+    assert "--no-color" in out
+    assert "NO_COLOR" in out
+
+
+@pytest.fixture
+def mocked_main(monkeypatch):
+    """Patches login and the server (never a real Plex), and keeps colorama out of it."""
+    section, _ = siamese_section()
+    monkeypatch.setattr(ps, "get_plex_credentials", fake_creds)
+    monkeypatch.setattr(ps, "PlexServer", lambda url, token: make_plex(section))
+    monkeypatch.setattr(plex_style, "_IS_WINDOWS", False)
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    monkeypatch.delenv("TERM", raising=False)
+
+
+@pytest.mark.parametrize("extra, env, colored", [
+    ([], {"FORCE_COLOR": "1"}, True),
+    (["--no-color"], {"FORCE_COLOR": "1"}, False),
+    ([], {"FORCE_COLOR": "1", "NO_COLOR": "1"}, False),
+    ([], {"FORCE_COLOR": "1", "TERM": "dumb"}, True),  # FORCE_COLOR beats TERM=dumb
+    ([], {"TERM": "dumb"}, False),
+    ([], {}, False),  # captured stdout is not a terminal
+])
+def test_main_color_resolution(mocked_main, monkeypatch, capsys, extra, env, colored):
+    monkeypatch.delenv("FORCE_COLOR", raising=False)
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+
+    assert ps.main(URL_ARGS + extra) == 0
+
+    out = capsys.readouterr().out
+    assert ("\x1b[" in out) is colored
+    assert "Dry run: 1 album(s)" in plex_style.strip(out)

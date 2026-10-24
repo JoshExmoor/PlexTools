@@ -77,6 +77,12 @@ Album mode (``--merge albums``):
 - A note is printed when both years are known and differ, and when the
   albums sit under different artist entries.
 - Survivor: the album with the most tracks; ties go to the lower ratingKey.
+
+Display:
+
+- Colors: on a terminal, names, years, counts, folders and tags are colored.
+  Use --no-color or set NO_COLOR (or TERM=dumb) to turn it off; output that
+  is piped or redirected is never colored (see plex_style.py).
 """
 
 import argparse
@@ -92,6 +98,7 @@ from plexapi.library import MusicSection
 from plexapi.server import PlexServer
 from tqdm import tqdm
 
+import plex_style as style
 from get_plex_credentials import get_plex_credentials, retrieve_plex_credentials, save_plex_credentials
 from plex_common import (  # noqa: F401 - re-exported under the names this module always used
     DRIVE_LETTER as _DRIVE_LETTER,
@@ -448,7 +455,11 @@ def _hydrate_album_groups(groups: list) -> list:
         try:
             directories, count = album_directories(entry.obj)
         except Exception as exc:  # noqa: BLE001 - one bad album must not abort the review
-            print(f'Warning: could not read tracks for "{entry.title}": {exc}', file=sys.stderr)
+            print(
+                f'{style.warn("Warning:", err=True)} could not read tracks for '
+                f'"{style.album(entry.title, err=True)}": {exc}',
+                file=sys.stderr,
+            )
             continue
         entry.directories = directories
         if not entry.track_count:
@@ -474,8 +485,8 @@ def find_album_candidates(music_section: MusicSection, artist: str = None, album
 def format_prompt(target: MergeEntry, other: MergeEntry) -> str:
     """Returns the confirmation prompt for merging `other` into `target`."""
     return (
-        f"Would you like to merge {target.title} ({target.album_count} albums) "
-        f"with {other.title} ({other.album_count} albums)? "
+        f"Would you like to merge {style.artist(target.title)} ({style.count(f'{target.album_count} albums')}) "
+        f"with {style.artist(other.title)} ({style.count(f'{other.album_count} albums')})? "
     )
 
 
@@ -486,8 +497,10 @@ def merge_entry(target: MergeEntry, other: MergeEntry) -> None:
 
 def _describe_pair(target: MergeEntry, other: MergeEntry) -> str:
     return (
-        f'  Keep ratingKey {target.rating_key} "{target.title}" ({target.album_count} albums); '
-        f'merge in ratingKey {other.rating_key} "{other.title}" ({other.album_count} albums)'
+        f'  Keep ratingKey {style.key(target.rating_key)} "{style.artist(target.title)}" '
+        f"({style.count(f'{target.album_count} albums')}); "
+        f'merge in ratingKey {style.key(other.rating_key)} "{style.artist(other.title)}" '
+        f"({style.count(f'{other.album_count} albums')})"
     )
 
 
@@ -504,7 +517,10 @@ def _tracks_text(count: int) -> str:
 
 
 def _album_label(entry: MergeEntry) -> str:
-    return f"{entry.title} by {entry.artist} ({_year_text(entry)}, {_tracks_text(entry.track_count)})"
+    return (
+        f"{style.album(entry.title)} by {style.artist(entry.artist)} "
+        f"({style.year(_year_text(entry))}, {style.count(_tracks_text(entry.track_count))})"
+    )
 
 
 # Folder status of an album pair (see folder_status()).
@@ -519,6 +535,14 @@ _FOLDER_TAGS = {
     SAME_FOLDERS: "[same folders]",
     DIFFERENT_FOLDERS: "[different folders]",
     FOLDERS_UNKNOWN: "[folders unknown]",
+}
+
+# Color of each tag (display only; see plex_style.tag()).
+_FOLDER_TAG_STATUS = {
+    SAME_FOLDER: "ok",
+    SAME_FOLDERS: "ok",
+    DIFFERENT_FOLDERS: "error",
+    FOLDERS_UNKNOWN: "warn",
 }
 
 
@@ -544,58 +568,67 @@ def format_album_prompt(target: MergeEntry, other: MergeEntry) -> str:
 
     Ends with a tag for the pair's current folder status, e.g. "[same folder]".
     """
-    tag = _FOLDER_TAGS[folder_status(target, other)]
+    status = folder_status(target, other)
+    tag = style.tag(_FOLDER_TAGS[status], _FOLDER_TAG_STATUS[status])
     return f"Would you like to merge {_album_label(target)} with {_album_label(other)}? {tag} "
 
 
 def _folder_list_lines(directories) -> list:
-    lines = [f"    {d}" for d in directories[:_MAX_FOLDERS_SHOWN]]
+    lines = [f"    {style.path(d)}" for d in directories[:_MAX_FOLDERS_SHOWN]]
     if len(directories) > _MAX_FOLDERS_SHOWN:
-        lines.append(f"    ... and {len(directories) - _MAX_FOLDERS_SHOWN} more")
+        lines.append(f"    ... and {style.count(len(directories) - _MAX_FOLDERS_SHOWN)} more")
     return lines
 
 
 def _folder_lines(role: str, directories) -> list:
     if directories is None:
-        return [f"  {role} folder: unknown (tracks could not be read)"]
+        return [f"  {role} folder: {style.warn('unknown (tracks could not be read)')}"]
     if not directories:
-        return [f"  {role} folder: unknown (no track files found)"]
+        return [f"  {role} folder: {style.warn('unknown (no track files found)')}"]
     if len(directories) == 1:
-        return [f"  {role} folder: {directories[0]}"]
-    return [f"  {role} folders ({len(directories)}):", *_folder_list_lines(directories)]
+        return [f"  {role} folder: {style.path(directories[0])}"]
+    return [f"  {role} folders ({style.count(len(directories))}):", *_folder_list_lines(directories)]
 
 
 def _folder_status_lines(target: MergeEntry, other: MergeEntry) -> list:
     status = folder_status(target, other)
     if status == SAME_FOLDER:
-        return [f"  Folders: both albums are in the same folder: {target.directories[0]}"]
+        return [
+            f"  Folders: {style.ok('both albums are in the same folder')}: {style.path(target.directories[0])}"
+        ]
     if status == SAME_FOLDERS:
         folders = _dedupe_folders(target.directories)
-        return [f"  Folders: both albums use the same {len(folders)} folders:", *_folder_list_lines(folders)]
+        return [
+            f"  Folders: {style.ok(f'both albums use the same {len(folders)} folders')}:",
+            *_folder_list_lines(folders),
+        ]
     if status == DIFFERENT_FOLDERS:
-        lines = ["  Note: these albums are in different folders"]
+        lines = [f"  {style.error('Note:')} these albums are in different folders"]
     else:
-        lines = ["  Note: could not confirm whether these albums share a folder"]
+        lines = [f"  {style.warn('Note:')} could not confirm whether these albums share a folder"]
     return lines + _folder_lines("Keep", target.directories) + _folder_lines("Merge-in", other.directories)
 
 
 def describe_album_pair(target: MergeEntry, other: MergeEntry) -> list:
     """Returns the context lines printed before an album prompt (and in dry run)."""
     lines = [
-        f'  Keep ratingKey {target.rating_key} "{target.title}" by {target.artist} '
-        f"({_year_text(target)}, {_tracks_text(target.track_count)}); "
-        f'merge in ratingKey {other.rating_key} "{other.title}" by {other.artist} '
-        f"({_year_text(other)}, {_tracks_text(other.track_count)})"
+        f'  Keep ratingKey {style.key(target.rating_key)} "{style.album(target.title)}" '
+        f"by {style.artist(target.artist)} "
+        f"({style.year(_year_text(target))}, {style.count(_tracks_text(target.track_count))}); "
+        f'merge in ratingKey {style.key(other.rating_key)} "{style.album(other.title)}" '
+        f"by {style.artist(other.artist)} "
+        f"({style.year(_year_text(other))}, {style.count(_tracks_text(other.track_count))})"
     ]
     if target.year and other.year and target.year != other.year:
         lines.append(
-            f"  Note: release years differ ({target.year} vs {other.year}) - "
+            f"  {style.error('Note:')} release years differ "
+            f"({style.year(target.year)} vs {style.year(other.year)}) - "
             "these may be different releases."
         )
     if target.artist_key != other.artist_key:
         lines.append(
-            "  Note: these albums are under different artist entries "
-            f"(ratingKey {target.artist_key} vs {other.artist_key}); "
+            f"  {style.warn('Note:')} these albums are under different artist entries "
+            f"(ratingKey {style.key(target.artist_key)} vs {style.key(other.artist_key)}); "
             "consider running --merge artists first."
         )
     lines += _folder_status_lines(target, other)
@@ -616,6 +649,7 @@ class MergeMode:
     format_prompt: object  # (target, other) -> str
     describe_pair: object  # (target, other) -> list[str] context lines
     absorb: object  # (target, other) -> None, updates the survivor after a merge
+    style_title: object = style.artist  # (title) -> str, colors the group header title (display only)
 
 
 def _find_artists(music_section, artist=None, album=None, threshold=DEFAULT_THRESHOLD, fuzzy=True):
@@ -639,6 +673,7 @@ ALBUM_MODE = MergeMode(
     format_prompt=format_album_prompt,
     describe_pair=describe_album_pair,
     absorb=_absorb_album,
+    style_title=style.album,
 )
 
 
@@ -653,7 +688,7 @@ def review_and_merge(groups: list, input_fn=None, dry_run: bool = False, mode: M
     """
     mode = mode or ARTIST_MODE
     summary = MergeSummary()
-    print(f"Found {len(groups)} candidate group(s).")
+    print(f"Found {style.count(len(groups))} candidate group(s).")
     if not groups:
         return summary
 
@@ -664,7 +699,9 @@ def review_and_merge(groups: list, input_fn=None, dry_run: bool = False, mode: M
     for index, group in enumerate(groups, start=1):
         if stopped:
             break
-        print(f'[{index}/{len(groups)}] "{group.target.title}" - {group.match} name match')
+        match_text = f"{group.match} name match"
+        match_text = style.ok(match_text) if group.match == "exact" else style.warn(match_text)
+        print(f'[{index}/{len(groups)}] "{mode.style_title(group.target.title)}" - {match_text}')
         for other in group.others:
             for line in mode.describe_pair(group.target, other):
                 print(line)
@@ -673,7 +710,7 @@ def review_and_merge(groups: list, input_fn=None, dry_run: bool = False, mode: M
             try:
                 confirmed = ask_yes_no(mode.format_prompt(group.target, other), input_fn)
             except (EOFError, KeyboardInterrupt):
-                print("\nStopping review.")
+                print("\n" + style.warn("Stopping review."))
                 summary.skipped += total_pairs - handled
                 stopped = True
                 break
@@ -684,18 +721,22 @@ def review_and_merge(groups: list, input_fn=None, dry_run: bool = False, mode: M
             try:
                 merge_entry(group.target, other)
             except (PlexApiException, requests.exceptions.RequestException) as exc:
-                print(f"Error: {exc}", file=sys.stderr)
+                print(f"{style.error('Error:', err=True)} {exc}", file=sys.stderr)
                 summary.failed += 1
                 continue
             summary.merged += 1
             mode.absorb(group.target, other)
-            print("Merged.")
+            print(style.ok("Merged."))
 
     if dry_run:
-        print(f"Dry run: {total_pairs} merge(s) would be offered. Nothing was changed.")
+        print(f"Dry run: {style.count(total_pairs)} merge(s) would be offered. Nothing was changed.")
         return summary
 
-    print(f"Summary: {summary.merged} merged, {summary.skipped} skipped, {summary.failed} failed.")
+    failed = style.error(summary.failed) if summary.failed else style.count(summary.failed)
+    print(
+        f"Summary: {style.ok(summary.merged)} merged, {style.count(summary.skipped)} skipped, "
+        f"{failed} failed."
+    )
     return summary
 
 
@@ -794,6 +835,11 @@ def parse_args(argv=None) -> argparse.Namespace:
         help="List merge candidates without prompting or merging anything.",
     )
     parser.add_argument(
+        "--no-color",
+        action="store_true",
+        help=style.NO_COLOR_HELP,
+    )
+    parser.add_argument(
         "-l", "--url",
         default=None,
         help=(
@@ -843,6 +889,7 @@ def parse_args(argv=None) -> argparse.Namespace:
 
 def main(argv=None) -> int:
     args = parse_args(argv)
+    style.configure(no_color=args.no_color)
 
     try:
         if args.credential_file:
@@ -879,7 +926,7 @@ def main(argv=None) -> int:
         ValueError,
         NotImplementedError,
     ) as exc:
-        print(f"Error: {exc}", file=sys.stderr)
+        print(f"{style.error('Error:', err=True)} {exc}", file=sys.stderr)
         return 1
 
     return 1 if summary.failed else 0

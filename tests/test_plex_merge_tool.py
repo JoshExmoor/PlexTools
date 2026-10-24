@@ -1282,3 +1282,179 @@ def test_main_albums_returns_1_on_section_not_found(monkeypatch):
     monkeypatch.setattr(pm, "PlexServer", lambda url, token: plex)
 
     assert pm.main(URL_ARGS + ["--merge", "albums", "--section", "Nope"]) == 1
+
+
+# ---------------------------------------------------------------------------
+# Colors (display only)
+# ---------------------------------------------------------------------------
+
+import plex_style  # noqa: E402
+
+CYAN, BOLD, YELLOW, GREEN, DIM, RED, RESET = (
+    "\x1b[36m", "\x1b[1m", "\x1b[33m", "\x1b[32m", "\x1b[2m", "\x1b[31m", "\x1b[0m",
+)
+
+
+def plain_and_colored(fn, *args):
+    """Returns (fn(*args) with color off, fn(*args) with color on)."""
+    plex_style.reset()
+    plain = fn(*args)
+    plex_style.enable()
+    return plain, fn(*args)
+
+
+def test_color_artist_prompt():
+    _, target, other = pomeroy_group()
+    plain, colored = plain_and_colored(pm.format_prompt, target, other)
+
+    assert plain == "Would you like to merge Ken Pomeroy (5 albums) with Ken Pomeroy (2 albums)? "
+    assert f"{CYAN}Ken Pomeroy{RESET}" in colored
+    assert f"{GREEN}5 albums{RESET}" in colored
+    assert plex_style.strip(colored) == plain
+    # The user's typed answer follows plain text: the last code before "? " is a reset.
+    assert colored.endswith(f"{RESET})? ")
+
+
+def test_color_artist_describe_pair():
+    _, target, other = pomeroy_group()
+    plain, colored = plain_and_colored(pm.ARTIST_MODE.describe_pair, target, other)
+    assert f"ratingKey {DIM}777239{RESET}" in colored[0]
+    assert [plex_style.strip(line) for line in colored] == plain
+
+
+@pytest.mark.parametrize("dirs_a, dirs_b, tag, code", [
+    (["E:\\A"], ["e:/a"], "[same folder]", GREEN),
+    (["E:\\A\\CD1", "E:\\A\\CD2"], ["E:\\A\\CD1", "E:\\A\\CD2"], "[same folders]", GREEN),
+    (["E:\\A"], ["E:\\B"], "[different folders]", RED),
+    (["E:\\A"], None, "[folders unknown]", YELLOW),
+])
+def test_color_album_prompt_tags(dirs_a, dirs_b, tag, code):
+    target = album_entry("Siamese Dream", 1, artist="X", tracks=2, year=1993, dirs=dirs_a)
+    other = album_entry("Siamese Dream", 2, artist="X", tracks=2, year=2011, dirs=dirs_b)
+    plain, colored = plain_and_colored(pm.format_album_prompt, target, other)
+
+    assert colored.endswith(f"? {code}{tag}{RESET} ")
+    assert f"{BOLD}Siamese Dream{RESET} by {CYAN}X{RESET}" in colored
+    assert f"({YELLOW}1993{RESET}, {GREEN}2 tracks{RESET})" in colored
+    assert plex_style.strip(colored) == plain
+
+
+def test_color_album_prompt_unknown_year():
+    entry_ = album_entry("A", 1, artist="X", tracks=1, dirs=["E:\\A"])
+    _, colored = plain_and_colored(pm.format_album_prompt, entry_, album_entry("A", 2, artist="X", dirs=["E:\\A"]))
+    assert f"{YELLOW}unknown year{RESET}" in colored
+
+
+def test_color_describe_album_pair_notes_and_paths():
+    target = album_entry("A", 1, artist_key=5, year=1993, dirs=["E:\\A"])
+    other = album_entry("A", 2, artist_key=6, year=2011, dirs=["E:\\B"])
+    plain, colored = plain_and_colored(pm.describe_album_pair, target, other)
+
+    years_line = next(line for line in colored if "release years differ" in line)
+    assert years_line.startswith(f"  {RED}Note:{RESET}")
+    assert f"{YELLOW}1993{RESET} vs {YELLOW}2011{RESET}" in years_line
+    artist_line = next(line for line in colored if "different artist entries" in line)
+    assert artist_line.startswith(f"  {YELLOW}Note:{RESET}")
+    assert f"  {RED}Note:{RESET} these albums are in different folders" in colored
+    assert f"  Keep folder: {DIM}E:\\A{RESET}" in colored
+    assert [plex_style.strip(line) for line in colored] == plain
+
+
+def test_color_describe_album_pair_same_and_unknown_folders():
+    plain, colored = plain_and_colored(
+        pm.describe_album_pair, album_entry("A", 1, dirs=["E:\\A"]), album_entry("A", 2, dirs=["e:/a"])
+    )
+    assert colored[-1] == f"  Folders: {GREEN}both albums are in the same folder{RESET}: {DIM}E:\\A{RESET}"
+    assert [plex_style.strip(line) for line in colored] == plain
+
+    plain, colored = plain_and_colored(
+        pm.describe_album_pair, album_entry("A", 1, dirs=["E:\\A"]), album_entry("A", 2, dirs=None)
+    )
+    assert f"  {YELLOW}Note:{RESET} could not confirm whether these albums share a folder" in colored
+    assert colored[-1] == f"  Merge-in folder: {YELLOW}unknown (tracks could not be read){RESET}"
+    assert [plex_style.strip(line) for line in colored] == plain
+
+
+def test_color_folder_values_stay_raw():
+    """Coloring never leaks into the stored folders used for comparisons."""
+    plex_style.enable()
+    target = album_entry("A", 1, tracks=5, dirs=["E:\\A"])
+    other = album_entry("A", 2, tracks=3, dirs=["E:\\B"])
+    pm.describe_album_pair(target, other)
+    pm.format_album_prompt(target, other)
+    assert target.directories == ["E:\\A"] and other.directories == ["E:\\B"]
+    assert pm.folder_status(target, other) == pm.DIFFERENT_FOLDERS
+
+
+def run_review(color, groups_fn, mode, answers, capsys):
+    if color:
+        plex_style.enable()
+    else:
+        plex_style.reset()
+    fake = scripted_input(answers)
+    summary = pm.review_and_merge(groups_fn(), input_fn=fake, mode=mode)
+    return summary, fake.prompts, capsys.readouterr().out
+
+
+def test_color_review_and_merge_artist(capsys):
+    groups_fn = lambda: [pomeroy_group()[0]]  # noqa: E731
+    plain_summary, plain_prompts, plain_out = run_review(False, groups_fn, pm.ARTIST_MODE, ["y"], capsys)
+    summary, prompts, out = run_review(True, groups_fn, pm.ARTIST_MODE, ["y"], capsys)
+
+    assert summary == plain_summary
+    assert f"{GREEN}Merged.{RESET}" in out
+    assert f'"{CYAN}Ken Pomeroy{RESET}" - {GREEN}exact name match{RESET}' in out
+    assert "\x1b" in prompts[0]
+    assert [plex_style.strip(p) for p in prompts] == plain_prompts
+    assert plex_style.strip(out) == plain_out
+
+
+def test_color_review_and_merge_album_header_and_failed_count(capsys):
+    def groups_fn():
+        target = album_entry("Low", 1, artist="X", year=1990, dirs=["E:\\a"])
+        other = album_entry("Low", 2, artist="X", year=1990, dirs=["E:\\a"])
+        target.obj.merge.side_effect = PlexApiException("boom")
+        return [pm.CandidateGroup(target, [other], "similar")]
+
+    _, plain_prompts, plain_out = run_review(False, groups_fn, pm.ALBUM_MODE, ["y"], capsys)
+    _, prompts, out = run_review(True, groups_fn, pm.ALBUM_MODE, ["y"], capsys)
+
+    assert f'"{BOLD}Low{RESET}" - {YELLOW}similar name match{RESET}' in out
+    assert f"{RED}1{RESET} failed." in out
+    assert prompts[0].endswith(f"{GREEN}[same folder]{RESET} ")
+    assert plex_style.strip(out) == plain_out
+    assert [plex_style.strip(p) for p in prompts] == plain_prompts
+
+
+@pytest.mark.parametrize("argv, expected", [([], False), (["--no-color"], True)])
+def test_parse_args_no_color(argv, expected):
+    assert pm.parse_args(["-l", "http://x:32400", *argv]).no_color is expected
+
+
+@pytest.fixture
+def mocked_main(monkeypatch):
+    """Patches login and the server (never a real Plex), and keeps colorama out of it."""
+    (plex, _), _ = pomeroy_plex()
+    monkeypatch.setattr(pm, "get_plex_credentials", fake_creds)
+    monkeypatch.setattr(pm, "PlexServer", lambda url, token: plex)
+    monkeypatch.setattr(plex_style, "_IS_WINDOWS", False)
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    monkeypatch.delenv("TERM", raising=False)
+
+
+@pytest.mark.parametrize("extra, env, colored", [
+    ([], {"FORCE_COLOR": "1"}, True),
+    (["--no-color"], {"FORCE_COLOR": "1"}, False),
+    ([], {"FORCE_COLOR": "1", "NO_COLOR": "1"}, False),
+    ([], {}, False),  # captured stdout is not a terminal
+])
+def test_main_color_resolution(mocked_main, monkeypatch, capsys, extra, env, colored):
+    monkeypatch.delenv("FORCE_COLOR", raising=False)
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+
+    assert pm.main(URL_ARGS + ["--dry-run", *extra]) == 0
+
+    out = capsys.readouterr().out
+    assert ("\x1b[" in out) is colored
+    assert "Dry run: " in plex_style.strip(out)
