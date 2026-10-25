@@ -17,14 +17,15 @@ How it works:
    disc rule below). An album whose tracks come from 2 or more album roots is
    queued as a candidate. Only candidates are then fetched from Plex (one
    request each), because a split needs the real album object.
-3. Review. Every queued candidate is listed with its ratingKey, year and the
-   track count per album folder. With ``--apply`` each one is followed by
-   ``Would you like to split [Album] by [Artist] (N tracks across M folders)?``
+3. Review. Every queued candidate is listed with its ratingKey and year in a
+   header line, then a table of its album folders (track count and number of
+   disc folders per folder). With ``--apply`` each one is followed by
+   ``Split "[Album]" (N tracks across M folders)? [y/N]``.
    Answer ``y``/``yes`` to split, ``n``/``no`` or just Enter to skip (the
    default is no). Without ``--apply`` (the default dry run) nothing is
    prompted or changed.
 4. Report. After each split the album's tracks are re-read by ratingKey and the
-   albums they now belong to are listed. A summary closes the run.
+   albums they now belong to are listed in a table. A summary closes the run.
 
 Disc folders are not separate albums:
 
@@ -53,9 +54,13 @@ Split caveats:
 
 Display:
 
-- Colors: on a terminal, names, years, counts, folders and notes are colored.
-  Use --no-color or set NO_COLOR (or TERM=dumb) to turn it off; output that
-  is piped or redirected is never colored (see plex_style.py).
+- Tables (built with rich) fit the terminal width; long folder paths are
+  shortened in the middle, keeping the drive/root and the album folder
+  (``E:\\MP3\\…\\Siamese Dream``).
+- Colors: on a terminal, names, years, counts, folders and notes are colored
+  and tables have rounded borders. Use --no-color or set NO_COLOR (or
+  TERM=dumb) to turn it off; output that is piped or redirected is never
+  colored and uses plain ASCII borders (see plex_style.py).
 """
 
 import argparse
@@ -81,7 +86,9 @@ from plex_common import (
     dedupe_folders,
     folder_key,
     is_windows_path,
+    question,
     server_dirname,
+    shorten_path,
 )
 from plex_sections import resolve_music_section
 from retrieve_plex_library import iter_tracks
@@ -260,11 +267,7 @@ def _load_candidates(music_section: MusicSection, candidates: list) -> None:
         try:
             obj = music_section.fetchItem(candidate.rating_key)
         except Exception as exc:  # noqa: BLE001 - one bad album must not abort the review
-            print(
-                f'{style.warn("Warning:", err=True)} could not load album '
-                f'"{style.album(candidate.title, err=True)}": {exc}',
-                file=sys.stderr,
-            )
+            style.eprint(style.warn("Warning:"), ' could not load album "', style.album(candidate.title), f'": {exc}')
             candidate.load_error = str(exc)
             continue
         candidate.obj = obj
@@ -283,11 +286,7 @@ def find_albums_by_folder(music_section: MusicSection, artist: str = None, album
     """
     albums, skipped_tracks = scan_album_tracks(music_section, artist=artist, album=album)
     if skipped_tracks:
-        print(
-            f"{style.warn('Skipped', err=True)} {style.count(skipped_tracks, err=True)} "
-            "track(s) with no album ratingKey.",
-            file=sys.stderr,
-        )
+        style.eprint(style.warn("Skipped"), " ", style.count(skipped_tracks), " track(s) with no album ratingKey.")
 
     candidates = [c for c in albums.values() if len(c.roots) >= 2]
     for candidate in candidates:
@@ -306,36 +305,80 @@ def _year_text(year) -> str:
     return str(year) if year else "unknown year"
 
 
-def _root_line(root: AlbumRoot) -> str:
-    tracks = style.count(_tracks_text(root.track_count))
-    if len(root.folders) > 1:
-        return f"  {style.path(root.display)} ({tracks} in {style.count(f'{len(root.folders)} disc folders')})"
-    return f"  {style.path(root.display)} ({tracks})"
+# Yes/no question for a candidate (plex_style.fill template; " [y/N] " is appended).
+SPLIT_QUESTION = 'Split "{title}" ({tracks} across {folders})?'
 
 
-def describe_candidate(candidate: SplitCandidate) -> list:
-    """Returns the context lines printed for a candidate (in dry run too)."""
-    lines = [f"  ratingKey {style.key(candidate.rating_key)}, {style.year(_year_text(candidate.year))}"]
-    lines += [_root_line(root) for root in candidate.roots[:MAX_FOLDERS_SHOWN]]
-    if len(candidate.roots) > MAX_FOLDERS_SHOWN:
-        lines.append(f"  ... and {style.count(len(candidate.roots) - MAX_FOLDERS_SHOWN)} more")
-    if candidate.pathless_tracks:
-        lines.append(
-            f"  {style.warn('Note:')} {style.count(candidate.pathless_tracks)} "
-            "track(s) have no file path and were not checked."
-        )
-    if candidate.load_error:
-        lines.append(f"  {style.error('Note:')} could not load this album from Plex: {candidate.load_error}")
-    return lines
-
-
-def format_split_prompt(candidate: SplitCandidate) -> str:
-    """Returns the confirmation prompt for splitting a candidate album."""
-    return (
-        f"Would you like to split {style.album(candidate.title)} by {style.artist(candidate.artist)} "
-        f"({style.count(_tracks_text(candidate.track_count))} across "
-        f"{style.count(f'{len(candidate.roots)} folders')})? "
+def format_candidate_header(index: int, total: int, candidate: SplitCandidate):
+    """Returns the header line printed before a candidate."""
+    return style.line(
+        f"[{index}/{total}] \"", style.album(candidate.title), '" by ', style.artist(candidate.artist),
+        "  (ratingKey ", style.key(candidate.rating_key), ", ", style.year(_year_text(candidate.year)), ")",
     )
+
+
+def _folder_width(width: int = None) -> int:
+    width = style.width() if width is None else width
+    # 2 indent; 3 columns -> 4 border characters + 6 padding; "Tracks" 6 + "Disc folders" 12.
+    return max(20, width - 2 - 28)
+
+
+def candidate_table(candidate: SplitCandidate, width: int = None):
+    """Returns the Folder / Tracks / Disc folders table for a candidate.
+
+    One row per album folder (up to MAX_FOLDERS_SHOWN); long paths are
+    middle-truncated to fit `width` (default: the stdout console width).
+    """
+    folder_width = _folder_width(width)
+    table = style.new_table("Folder", ("Tracks", {"justify": "right"}), ("Disc folders", {"justify": "right"}))
+    for root in candidate.roots[:MAX_FOLDERS_SHOWN]:
+        table.add_row(
+            style.path(shorten_path(root.display, folder_width, style.ellipsis())),
+            style.count(root.track_count),
+            style.count(len(root.folders)) if len(root.folders) > 1 else "",
+        )
+    if len(candidate.roots) > MAX_FOLDERS_SHOWN:
+        more = style.count(len(candidate.roots) - MAX_FOLDERS_SHOWN)
+        table.add_row(style.line(f"{style.ellipsis()} and ", more, " more"), "", "")
+    return table
+
+
+def describe_candidate(candidate: SplitCandidate, width: int = None) -> list:
+    """Returns the renderables printed for a candidate (in dry run too)."""
+    items = [style.indent(candidate_table(candidate, width))]
+    if candidate.pathless_tracks:
+        items.append(style.line(
+            "  ", style.warn("Note:"), " ", style.count(candidate.pathless_tracks),
+            " track(s) have no file path and were not checked.",
+        ))
+    if candidate.load_error:
+        items.append(style.line(
+            "  ", style.error("Note:"), f" could not load this album from Plex: {candidate.load_error}"
+        ))
+    return items
+
+
+def format_split_prompt(candidate: SplitCandidate):
+    """Returns the confirmation prompt (rich Text) for splitting a candidate album."""
+    return question(
+        SPLIT_QUESTION,
+        title=style.album(candidate.title),
+        tracks=style.count(_tracks_text(candidate.track_count)),
+        folders=style.count(f"{len(candidate.roots)} folders"),
+    )
+
+
+def split_report_table(rows: list, original_key):
+    """Returns the post-split table: one row per (album ratingKey, title, track count)."""
+    table = style.new_table("ratingKey", "Title", ("Tracks", {"justify": "right"}), "Note")
+    for album_key, title, track_count in rows:
+        table.add_row(
+            style.key(album_key),
+            style.album(title),
+            style.count(track_count),
+            style.key("original") if album_key == original_key else "",
+        )
+    return table
 
 
 ALBUMS_BY_FOLDER_MODE = SplitMode(
@@ -376,26 +419,24 @@ def report_split(music_section: MusicSection, candidate: SplitCandidate) -> str:
     missing = len(keys) - len(found)
     result = "split"
     if not albums:
-        print(style.warn(f"Split requested. None of the album's {_tracks_text(len(keys))} could be found yet."))
+        style.say(style.warn(f"Split requested. None of the album's {_tracks_text(len(keys))} could be found yet."))
     elif set(albums) == {candidate.rating_key}:
-        print(
-            f"{style.warn('Plex did not divide this album:')} all {style.count(_tracks_text(len(found)))} "
-            f"are still under ratingKey {style.key(candidate.rating_key)}."
+        style.say(
+            style.warn("Plex did not divide this album:"), " all ", style.count(_tracks_text(len(found))),
+            " are still under ratingKey ", style.key(candidate.rating_key), ".",
         )
         result = "unchanged"
     else:
-        print(style.ok("Split requested. Plex now lists these tracks under:"))
+        style.say(style.ok("Split requested. Plex now lists these tracks under:"))
         ordered = sorted(albums, key=lambda k: (k != candidate.rating_key, str(k)))
-        for album_key in ordered:
-            entry = albums[album_key]
-            tag = " " + style.key("[original]") if album_key == candidate.rating_key else ""
-            print(
-                f'  ratingKey {style.key(album_key)} "{style.album(entry["title"] or "Unknown album")}" '
-                f'({style.count(_tracks_text(entry["count"]))}){tag}'
-            )
+        rows = [
+            (album_key, albums[album_key]["title"] or "Unknown album", albums[album_key]["count"])
+            for album_key in ordered
+        ]
+        style.out(style.indent(split_report_table(rows, candidate.rating_key)))
     if missing and albums:
-        print(f"  {style.warn('Note:')} {style.count(missing)} track(s) could not be found after the split.")
-    print("  Plex may still be processing; re-run this tool to see the current state.")
+        style.say("  ", style.warn("Note:"), " ", style.count(missing), " track(s) could not be found after the split.")
+    style.say("  Plex may still be processing; re-run this tool to see the current state.")
     return result
 
 
@@ -415,27 +456,27 @@ def review_and_split(
     """
     mode = mode or ALBUMS_BY_FOLDER_MODE
     summary = SplitSummary()
-    print(f"Found {style.count(len(candidates))} album(s) whose tracks span more than one album folder.")
+    style.say("Found ", style.count(len(candidates)), " album(s) whose tracks span more than one album folder.")
     if not candidates:
         return summary
     if apply:
-        print(style.warn(f"Note: {SPLIT_CAVEAT}"))
+        style.say(style.warn(f"Note: {SPLIT_CAVEAT}"))
 
     total = len(candidates)
     for index, candidate in enumerate(candidates, start=1):
-        print(f'[{index}/{total}] "{style.album(candidate.title)}" by {style.artist(candidate.artist)}')
-        for line in mode.describe(candidate):
-            print(line)
+        style.blank()
+        style.out(format_candidate_header(index, total, candidate))
+        style.out(*mode.describe(candidate))
         if not apply:
             continue
         if candidate.obj is None:
-            print(style.error("Cannot split: album could not be loaded."))
+            style.say(style.error("Cannot split: album could not be loaded."))
             summary.failed += 1
             continue
         try:
             confirmed = ask_yes_no(mode.format_prompt(candidate), input_fn)
         except (EOFError, KeyboardInterrupt):
-            print("\n" + style.warn("Stopping review."))
+            style.say("\n", style.warn("Stopping review."))
             summary.skipped += total - index + 1
             break
         if not confirmed:
@@ -444,16 +485,13 @@ def review_and_split(
         try:
             split_album(candidate)
         except (PlexApiException, requests.exceptions.RequestException) as exc:
-            print(f"{style.error('Error:', err=True)} {exc}", file=sys.stderr)
+            style.eprint(style.error("Error:"), f" {exc}")
             summary.failed += 1
             continue
         try:
             outcome = report_split(music_section, candidate)
         except Exception as exc:  # noqa: BLE001 - the split itself succeeded
-            print(
-                f"{style.warn('Warning:', err=True)} split requested, but the tracks could not be re-read: {exc}",
-                file=sys.stderr,
-            )
+            style.eprint(style.warn("Warning:"), f" split requested, but the tracks could not be re-read: {exc}")
             outcome = "split"
         if outcome == "unchanged":
             summary.unchanged += 1
@@ -462,17 +500,17 @@ def review_and_split(
 
     if not apply:
         offered = sum(1 for c in candidates if c.obj is not None)
-        print(
-            f"Dry run: {style.count(offered)} album(s) would be offered for splitting. "
+        style.say(
+            "Dry run: ", style.count(offered), " album(s) would be offered for splitting. "
             "Nothing was changed. Use --apply to split."
         )
         return summary
 
     unchanged = style.warn(summary.unchanged) if summary.unchanged else style.count(summary.unchanged)
     failed = style.error(summary.failed) if summary.failed else style.count(summary.failed)
-    print(
-        f"Summary: {style.ok(summary.split)} split, {unchanged} unchanged, "
-        f"{style.count(summary.skipped)} skipped, {failed} failed."
+    style.say(
+        "Summary: ", style.ok(summary.split), " split, ", unchanged, " unchanged, ",
+        style.count(summary.skipped), " skipped, ", failed, " failed.",
     )
     return summary
 
@@ -646,7 +684,7 @@ def main(argv=None) -> int:
         ValueError,
         NotImplementedError,
     ) as exc:
-        print(f"{style.error('Error:', err=True)} {exc}", file=sys.stderr)
+        style.eprint(style.error("Error:"), f" {exc}")
         return 1
 
     return 1 if summary.failed else 0

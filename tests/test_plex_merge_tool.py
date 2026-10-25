@@ -1,3 +1,4 @@
+import re
 from datetime import datetime
 from unittest.mock import MagicMock
 
@@ -7,11 +8,36 @@ from plexapi.exceptions import NotFound, PlexApiException
 from plexapi.library import MusicSection
 
 import plex_merge_tool as pm
+import plex_style as style
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def render_all(items):
+    """Renders describe_*() renderables the way review_and_merge() prints them."""
+    return "".join(style.render(item) for item in items)
+
+
+def _plain(value):
+    return value.plain if hasattr(value, "plain") else str(value)
+
+
+def table_rows(table):
+    """Returns the table's rows as tuples of plain cell text."""
+    columns = [list(column.cells) for column in table.columns]
+    return [tuple(_plain(column[i]) for column in columns) for i in range(table.row_count)]
+
+
+def pair_rows(table):
+    """Returns {row label: (Keep cell, Merge in cell)} for a pair table."""
+    return {row[0]: row[1:] for row in table_rows(table)}
+
+
+def table_of(items):
+    """Returns the Table inside the first (indented) describe_*() item."""
+    return items[0].renderable
 
 def make_artist(title, rating_key):
     artist = MagicMock()
@@ -280,7 +306,13 @@ def test_find_artist_candidates_pomeroy():
 
 def test_format_prompt_exact_wording():
     prompt = pm.format_prompt(entry("Ken Pomeroy", 777239, 5), entry("Ken Pomeroy", 858664, 2))
-    assert prompt == "Would you like to merge Ken Pomeroy (5 albums) with Ken Pomeroy (2 albums)? "
+    assert prompt.plain == 'Merge "Ken Pomeroy" (2 albums) into "Ken Pomeroy" (5 albums)? [y/N] '
+    assert pm.style.prompt_str(prompt) == prompt.plain
+
+
+def test_format_prompt_single_album_wording():
+    prompt = pm.format_prompt(entry("Low", 1, 3), entry("Low", 2, 1))
+    assert prompt.plain == 'Merge "Low" (1 album) into "Low" (3 albums)? [y/N] '
 
 
 @pytest.mark.parametrize("answer", ["y", "yes", "Y", " YES "])
@@ -337,8 +369,8 @@ def test_review_three_member_group_pairwise():
 
     target.obj.merge.assert_called_once_with([2])
     assert fake.prompts == [
-        "Would you like to merge Low (3 albums) with Low (2 albums)? ",
-        "Would you like to merge Low (5 albums) with Low (1 albums)? ",
+        'Merge "Low" (2 albums) into "Low" (3 albums)? [y/N] ',
+        'Merge "Low" (1 album) into "Low" (5 albums)? [y/N] ',
     ]
     assert (summary.merged, summary.skipped) == (1, 1)
 
@@ -380,7 +412,9 @@ def test_review_dry_run_never_prompts_or_merges(capsys):
     assert (summary.merged, summary.skipped, summary.failed) == (0, 0, 0)
     out = capsys.readouterr().out
     assert "Dry run: 1 merge(s) would be offered." in out
-    assert "Keep ratingKey 777239" in out
+    assert "777239" in out and "858664" in out
+    assert "| ratingKey |" in out
+    assert "[y/N]" not in out
 
 
 def test_review_no_groups():
@@ -644,11 +678,12 @@ def test_album_split_artist_grouped_with_note():
     groups = pm.find_album_candidates(section)
 
     assert len(groups) == 1
-    lines = pm.describe_album_pair(groups[0].target, groups[0].others[0])
+    items = pm.describe_album_pair(groups[0].target, groups[0].others[0])
     assert any(
-        "different artist entries (ratingKey 777239 vs 858664)" in line and "--merge artists" in line
-        for line in lines
+        "different artist entries (ratingKey 777239 vs 858664)" in _plain(item) and "--merge artists" in _plain(item)
+        for item in items[1:]
     )
+    assert pair_rows(table_of(items))["Artist"] == ("The Smashing Pumpkins", "Smashing Pumpkins")
 
 
 def test_album_same_rating_key_not_a_candidate():
@@ -715,10 +750,9 @@ def test_album_prompt_exact_wording():
         "Siamese Dream", 100, artist="The Smashing Pumpkins", tracks=13, year=1993, dirs=["E:\\A"],
     )
     other = album_entry("Siamese Dream", 200, artist="Smashing Pumpkins", tracks=13, year=2011, dirs=["E:\\B"])
-    assert pm.format_album_prompt(target, other) == (
-        "Would you like to merge Siamese Dream by The Smashing Pumpkins (1993, 13 tracks) "
-        "with Siamese Dream by Smashing Pumpkins (2011, 13 tracks)? [different folders] "
-    )
+    prompt = pm.format_album_prompt(target, other)
+    assert prompt.plain == 'Merge "Siamese Dream" (2011) into "Siamese Dream" (1993)? [different folders] [y/N] '
+    assert style.prompt_str(prompt) == prompt.plain
 
 
 def test_album_year_falls_back_to_release_date_then_unknown():
@@ -731,9 +765,10 @@ def test_album_year_falls_back_to_release_date_then_unknown():
     assert entries[0].year == 2011
     assert entries[1].year is None
     prompt = pm.format_album_prompt(entries[0], entries[1])
-    assert prompt == (
-        "Would you like to merge A by X (2011, 1 track) with A by X (unknown year, 1 track)? [folders unknown] "
-    )
+    assert prompt.plain == 'Merge "A" (unknown year) into "A" (2011)? [folders unknown] [y/N] '
+    rows = pair_rows(pm.album_pair_table(entries[0], entries[1]))
+    assert rows["Year"] == ("2011", "unknown year")
+    assert rows["Tracks"] == ("1 track", "1 track")
 
 
 def test_album_year_field_preferred_over_release_date():
@@ -749,21 +784,23 @@ def test_album_year_field_preferred_over_release_date():
     (None, None, False),
 ])
 def test_album_years_differ_note(year_a, year_b, expected):
-    lines = pm.describe_album_pair(
+    items = pm.describe_album_pair(
         album_entry("Siamese Dream", 100, year=year_a, dirs=["E:\\a"]),
         album_entry("Siamese Dream", 200, year=year_b, dirs=["E:\\a"]),
     )
+    lines = [_plain(item) for item in items[1:]]
     note = "  Note: release years differ (1993 vs 2011) - these may be different releases."
     assert (note in lines) is expected
     assert any("release years differ" in line for line in lines) is expected
+    assert ("(differs)" in render_all(items)) is expected
 
 
 def test_album_same_artist_entry_has_no_artist_note():
-    lines = pm.describe_album_pair(
+    items = pm.describe_album_pair(
         album_entry("Siamese Dream", 100, dirs=["E:\\a"]),
         album_entry("Siamese Dream", 200, dirs=["E:\\a"]),
     )
-    assert not any("different artist entries" in line for line in lines)
+    assert "different artist entries" not in render_all(items)
 
 
 # ---------------------------------------------------------------------------
@@ -783,10 +820,10 @@ def test_album_folders_shown_when_different_windows_paths():
     _, section = make_plex([], albums)
 
     group = pm.find_album_candidates(section)[0]
-    lines = pm.describe_album_pair(group.target, group.others[0])
+    items = pm.describe_album_pair(group.target, group.others[0])
 
-    assert "  Keep folder: E:\\MP3\\A" in lines
-    assert "  Merge-in folder: E:\\MP3\\B" in lines
+    assert pair_rows(table_of(items))["Folder"] == ("E:\\MP3\\A", "E:\\MP3\\B")
+    assert _plain(items[-1]) == "  Folders: these albums are in different folders"
 
 
 def test_album_identical_folder_shows_same_folder_line_only():
@@ -797,10 +834,11 @@ def test_album_identical_folder_shows_same_folder_line_only():
     _, section = make_plex([], albums)
 
     group = pm.find_album_candidates(section)[0]
-    lines = pm.describe_album_pair(group.target, group.others[0])
+    items = pm.describe_album_pair(group.target, group.others[0])
 
-    assert lines[-1] == "  Folders: both albums are in the same folder: E:\\MP3\\A"
-    assert not any("Keep folder" in line or "Merge-in folder" in line for line in lines)
+    assert _plain(items[-1]) == "  Folders: both albums are in the same folder"
+    assert pair_rows(table_of(items))["Folder"] == ("E:\\MP3\\A", "E:\\MP3\\A")
+    assert len(items) == 2  # table + status line, no notes
 
 
 def test_album_folders_posix_paths():
@@ -825,26 +863,24 @@ def test_album_multi_folder_album_lists_every_folder():
     _, section = make_plex([], albums)
 
     group = pm.find_album_candidates(section)[0]
-    lines = pm.describe_album_pair(group.target, group.others[0])
+    items = pm.describe_album_pair(group.target, group.others[0])
 
-    assert lines[-4:] == [
-        "  Keep folders (2):",
-        "    E:\\MP3\\Ken Pomeroy\\2021 Christmas Lights In April",
-        "    E:\\MP3\\Ken Pomeroy\\Misc",
-        "  Merge-in folder: E:\\MP3\\Ken Pomeroy\\Misc",
-    ]
+    assert pair_rows(table_of(items))["Folders"] == (
+        "E:\\MP3\\Ken Pomeroy\\2021 Christmas Lights In April\nE:\\MP3\\Ken Pomeroy\\Misc",
+        "E:\\MP3\\Ken Pomeroy\\Misc",
+    )
 
 
 def test_album_folders_capped():
     dirs = [f"E:\\MP3\\D{i}" for i in range(7)]
-    lines = pm.describe_album_pair(
+    items = pm.describe_album_pair(
         album_entry("A", 100, dirs=dirs),
         album_entry("A", 200, dirs=["E:\\MP3\\Other"]),
     )
-    assert "  Keep folders (7):" in lines
-    assert "    E:\\MP3\\D4" in lines
-    assert "    E:\\MP3\\D5" not in lines
-    assert "    ... and 2 more" in lines
+    keep, merge_in = pair_rows(table_of(items))["Folders"]
+    assert keep.splitlines() == [f"E:\\MP3\\D{i}" for i in range(5)] + ["... and 2 more"]
+    assert merge_in == "E:\\MP3\\Other"
+    assert "E:\\MP3\\D5" not in render_all(items)
 
 
 def test_album_tracks_error_warns_and_review_continues(capsys):
@@ -857,7 +893,7 @@ def test_album_tracks_error_warns_and_review_continues(capsys):
 
     captured = capsys.readouterr()
     assert 'Warning: could not read tracks for "Siamese Dream": nope' in captured.err
-    assert "  Merge-in folder: unknown (tracks could not be read)" in captured.out
+    assert "| unknown (tracks could not be read) |" in captured.out
     assert summary.skipped == 1
 
 
@@ -878,7 +914,7 @@ def test_album_unexpected_tracks_error_does_not_abort(capsys, error):
 
     captured = capsys.readouterr()
     assert f'Warning: could not read tracks for "Siamese Dream": {error}' in captured.err
-    assert "  Merge-in folder: unknown (tracks could not be read)" in captured.out
+    assert "| unknown (tracks could not be read) |" in captured.out
     assert len(fake.prompts) == 2
     albums[0].merge.assert_called_once_with([200])
     albums[2].merge.assert_called_once_with([400])
@@ -932,18 +968,20 @@ def test_album_windows_folders_differing_by_case_or_separator_match(other_path):
     _, section = make_plex([], albums)
 
     group = pm.find_album_candidates(section)[0]
-    lines = pm.describe_album_pair(group.target, group.others[0])
+    items = pm.describe_album_pair(group.target, group.others[0])
 
-    assert lines[-1] == "  Folders: both albums are in the same folder: E:\\MP3\\Foo"
+    assert _plain(items[-1]) == "  Folders: both albums are in the same folder"
+    assert pair_rows(table_of(items))["Folder"] == ("E:\\MP3\\Foo", pm._server_dirname(other_path))
     assert pm.folder_status(group.target, group.others[0]) == pm.SAME_FOLDER
 
 
 def test_album_windows_trailing_separator_ignored():
-    lines = pm.describe_album_pair(
+    items = pm.describe_album_pair(
         album_entry("A", 100, dirs=["E:\\MP3\\Foo\\"]),
         album_entry("A", 200, dirs=["e:/mp3/foo"]),
     )
-    assert lines[-1] == "  Folders: both albums are in the same folder: E:\\MP3\\Foo\\"
+    assert _plain(items[-1]) == "  Folders: both albums are in the same folder"
+    assert pair_rows(table_of(items))["Folder"] == ("E:\\MP3\\Foo\\", "e:/mp3/foo")
 
 
 def test_album_different_windows_folders_show_original_strings():
@@ -954,12 +992,10 @@ def test_album_different_windows_folders_show_original_strings():
     _, section = make_plex([], albums)
 
     group = pm.find_album_candidates(section)[0]
-    lines = pm.describe_album_pair(group.target, group.others[0])
+    items = pm.describe_album_pair(group.target, group.others[0])
 
-    assert lines[-2:] == [
-        "  Keep folder: E:\\MP3\\Foo",
-        "  Merge-in folder: e:/mp3/Bar",
-    ]
+    assert pair_rows(table_of(items))["Folder"] == ("E:\\MP3\\Foo", "e:/mp3/Bar")
+    assert _plain(items[-1]) == "  Folders: these albums are in different folders"
 
 
 def test_album_dedupes_case_variant_folders_keeping_first_seen():
@@ -979,9 +1015,10 @@ def test_album_posix_folders_differing_by_case_stay_different():
     _, section = make_plex([], albums)
 
     group = pm.find_album_candidates(section)[0]
-    lines = pm.describe_album_pair(group.target, group.others[0])
+    items = pm.describe_album_pair(group.target, group.others[0])
 
-    assert lines[-2:] == ["  Keep folder: /music/Foo", "  Merge-in folder: /music/foo"]
+    assert pair_rows(table_of(items))["Folder"] == ("/music/Foo", "/music/foo")
+    assert _plain(items[-1]) == "  Folders: these albums are in different folders"
 
 
 def test_album_absorb_does_not_create_case_duplicate_folders():
@@ -1054,11 +1091,13 @@ def test_album_review_three_member_group_updates_track_count():
 
     target.obj.merge.assert_called_once_with([2])
     assert fake.prompts == [
-        "Would you like to merge Low by X (1990, 5 tracks) with Low by X (1990, 3 tracks)? [different folders] ",
-        "Would you like to merge Low by X (1990, 8 tracks) with Low by X (1990, 1 track)? [different folders] ",
+        'Merge "Low" (1990) into "Low" (1990)? [different folders] [y/N] ',
+        'Merge "Low" (1990) into "Low" (1990)? [different folders] [y/N] ',
     ]
     assert target.directories == ["E:\\a", "E:\\b"]
     assert (summary.merged, summary.skipped) == (1, 1)
+    # The second table shows the survivor's updated track count.
+    assert pair_rows(pm.album_pair_table(target, b))["Tracks"] == ("8 tracks", "1 track")
 
 
 def test_album_dry_run_shows_year_and_folders(capsys):
@@ -1076,12 +1115,14 @@ def test_album_dry_run_shows_year_and_folders(capsys):
     for album in albums:
         album.merge.assert_not_called()
     out = capsys.readouterr().out
-    assert "(1993, 1 track)" in out
-    assert "(2011, 1 track)" in out
+    assert "| 1993 " in out
+    assert "| 2011 (differs) " in out
+    assert "| 1 track " in out
     assert "release years differ (1993 vs 2011)" in out
-    assert "  Note: these albums are in different folders" in out
-    assert "  Keep folder: E:\\MP3\\A" in out
-    assert "  Merge-in folder: E:\\MP3\\B" in out
+    assert "  Folders: these albums are in different folders" in out
+    assert "| E:\\MP3\\A " in out
+    assert "| E:\\MP3\\B " in out
+    assert "[y/N]" not in out
     assert "Dry run: 1 merge(s) would be offered." in out
 
 
@@ -1098,8 +1139,9 @@ def test_album_dry_run_shows_same_folder_status(capsys):
     pm.run_merge_tool(plex, mode="albums", dry_run=True, input_fn=no_input)
 
     out = capsys.readouterr().out
-    assert "  Folders: both albums are in the same folder: E:\\MP3\\A" in out
-    assert "Keep folder" not in out
+    assert "  Folders: both albums are in the same folder\n" in out
+    assert out.count("E:\\MP3\\A") == 2  # once per table column
+    assert "[y/N]" not in out
 
 
 # ---------------------------------------------------------------------------
@@ -1125,53 +1167,42 @@ def test_folder_status(dirs_a, dirs_b, expected):
     assert status == expected
 
 
-def test_describe_same_folders_lists_target_folders_without_keep_lists():
-    lines = pm.describe_album_pair(
+def test_describe_same_folders_lists_folders_in_table():
+    items = pm.describe_album_pair(
         album_entry("A", 1, dirs=["E:\\A\\CD1", "E:\\A\\CD2"]),
         album_entry("A", 2, dirs=["e:/a/cd1", "e:/a/cd2"]),
     )
-    assert lines[-3:] == [
-        "  Folders: both albums use the same 2 folders:",
-        "    E:\\A\\CD1",
-        "    E:\\A\\CD2",
-    ]
-    assert not any("Keep folder" in line or "Merge-in folder" in line for line in lines)
+    assert _plain(items[-1]) == "  Folders: both albums use the same 2 folders"
+    assert pair_rows(table_of(items))["Folders"] == ("E:\\A\\CD1\nE:\\A\\CD2", "e:/a/cd1\ne:/a/cd2")
 
 
 def test_describe_same_folders_capped():
     dirs = [f"E:\\A\\D{i}" for i in range(7)]
-    lines = pm.describe_album_pair(album_entry("A", 1, dirs=dirs), album_entry("A", 2, dirs=list(dirs)))
-    assert "  Folders: both albums use the same 7 folders:" in lines
-    assert "    E:\\A\\D4" in lines
-    assert "    E:\\A\\D5" not in lines
-    assert lines[-1] == "    ... and 2 more"
+    items = pm.describe_album_pair(album_entry("A", 1, dirs=dirs), album_entry("A", 2, dirs=list(dirs)))
+    assert _plain(items[-1]) == "  Folders: both albums use the same 7 folders"
+    keep, merge_in = pair_rows(table_of(items))["Folders"]
+    assert keep == merge_in
+    assert keep.splitlines()[-2:] == ["E:\\A\\D4", "... and 2 more"]
+    assert "E:\\A\\D5" not in render_all(items)
 
 
-def test_describe_different_folders_note_and_lists():
-    lines = pm.describe_album_pair(
+def test_describe_different_folders_status_and_table():
+    items = pm.describe_album_pair(
         album_entry("A", 1, dirs=["E:\\A", "E:\\B"]),
         album_entry("A", 2, dirs=["E:\\A"]),
     )
-    assert lines[-5:] == [
-        "  Note: these albums are in different folders",
-        "  Keep folders (2):",
-        "    E:\\A",
-        "    E:\\B",
-        "  Merge-in folder: E:\\A",
-    ]
+    assert _plain(items[-1]) == "  Folders: these albums are in different folders"
+    assert pair_rows(table_of(items))["Folders"] == ("E:\\A\nE:\\B", "E:\\A")
 
 
-@pytest.mark.parametrize("dirs_b, merge_in_line", [
-    (None, "  Merge-in folder: unknown (tracks could not be read)"),
-    ([], "  Merge-in folder: unknown (no track files found)"),
+@pytest.mark.parametrize("dirs_b, merge_in_cell", [
+    (None, "unknown (tracks could not be read)"),
+    ([], "unknown (no track files found)"),
 ])
-def test_describe_unknown_folders_note_and_lists(dirs_b, merge_in_line):
-    lines = pm.describe_album_pair(album_entry("A", 1, dirs=["E:\\A"]), album_entry("A", 2, dirs=dirs_b))
-    assert lines[-3:] == [
-        "  Note: could not confirm whether these albums share a folder",
-        "  Keep folder: E:\\A",
-        merge_in_line,
-    ]
+def test_describe_unknown_folders_status_and_table(dirs_b, merge_in_cell):
+    items = pm.describe_album_pair(album_entry("A", 1, dirs=["E:\\A"]), album_entry("A", 2, dirs=dirs_b))
+    assert _plain(items[-1]) == "  Folders: could not confirm whether these albums share a folder"
+    assert pair_rows(table_of(items))["Folder"] == ("E:\\A", merge_in_cell)
 
 
 @pytest.mark.parametrize("dirs_a, dirs_b, tag", [
@@ -1186,7 +1217,7 @@ def test_album_prompt_ends_with_folder_tag(dirs_a, dirs_b, tag):
         album_entry("A", 1, artist="X", tracks=2, year=1993, dirs=dirs_a),
         album_entry("A", 2, artist="X", tracks=2, year=1993, dirs=dirs_b),
     )
-    assert prompt == f"Would you like to merge A by X (1993, 2 tracks) with A by X (1993, 2 tracks)? {tag} "
+    assert prompt.plain == f'Merge "A" (1993) into "A" (1993)? {tag} [y/N] '
 
 
 def test_album_three_member_group_tag_reflects_absorbed_folders():
@@ -1198,8 +1229,8 @@ def test_album_three_member_group_tag_reflects_absorbed_folders():
 
     pm.review_and_merge([group], input_fn=fake, mode=pm.ALBUM_MODE)
 
-    assert fake.prompts[0].endswith("? [different folders] ")
-    assert fake.prompts[1].endswith("? [same folders] ")
+    assert fake.prompts[0].endswith("? [different folders] [y/N] ")
+    assert fake.prompts[1].endswith("? [same folders] [y/N] ")
 
 
 # ---------------------------------------------------------------------------
@@ -1295,31 +1326,45 @@ CYAN, BOLD, YELLOW, GREEN, DIM, RED, RESET = (
 )
 
 
+_BORDERS = re.compile(r"[\s|+\-\u2500-\u257f]+")
+
+
+def words(text):
+    """Text without color codes or table borders (ASCII or Unicode), for comparing color on/off output."""
+    return _BORDERS.sub(" ", plex_style.strip(text)).split()
+
+
+def _render_value(value):
+    return render_all(value) if isinstance(value, list) else plex_style.prompt_str(value)
+
+
 def plain_and_colored(fn, *args):
-    """Returns (fn(*args) with color off, fn(*args) with color on)."""
+    """Returns (fn(*args) rendered with color off, fn(*args) rendered with color on)."""
     plex_style.reset()
-    plain = fn(*args)
+    plain = _render_value(fn(*args))
     plex_style.enable()
-    return plain, fn(*args)
+    return plain, _render_value(fn(*args))
 
 
 def test_color_artist_prompt():
     _, target, other = pomeroy_group()
     plain, colored = plain_and_colored(pm.format_prompt, target, other)
 
-    assert plain == "Would you like to merge Ken Pomeroy (5 albums) with Ken Pomeroy (2 albums)? "
-    assert f"{CYAN}Ken Pomeroy{RESET}" in colored
-    assert f"{GREEN}5 albums{RESET}" in colored
+    assert plain == 'Merge "Ken Pomeroy" (2 albums) into "Ken Pomeroy" (5 albums)? [y/N] '
+    assert f'"{CYAN}Ken Pomeroy{RESET}"' in colored
+    assert f"({GREEN}5 albums{RESET})" in colored
     assert plex_style.strip(colored) == plain
-    # The user's typed answer follows plain text: the last code before "? " is a reset.
-    assert colored.endswith(f"{RESET})? ")
+    # The user's typed answer follows plain text: the last code before "[y/N] " is a reset.
+    assert colored.endswith(f"{RESET})? [y/N] ")
 
 
 def test_color_artist_describe_pair():
     _, target, other = pomeroy_group()
     plain, colored = plain_and_colored(pm.ARTIST_MODE.describe_pair, target, other)
-    assert f"ratingKey {DIM}777239{RESET}" in colored[0]
-    assert [plex_style.strip(line) for line in colored] == plain
+    assert f"{DIM}777239" in colored
+    assert f"{CYAN}Ken Pomeroy" in colored
+    assert "\u256d" in colored and "\u256d" not in plain
+    assert words(colored) == words(plain)
 
 
 @pytest.mark.parametrize("dirs_a, dirs_b, tag, code", [
@@ -1333,9 +1378,9 @@ def test_color_album_prompt_tags(dirs_a, dirs_b, tag, code):
     other = album_entry("Siamese Dream", 2, artist="X", tracks=2, year=2011, dirs=dirs_b)
     plain, colored = plain_and_colored(pm.format_album_prompt, target, other)
 
-    assert colored.endswith(f"? {code}{tag}{RESET} ")
-    assert f"{BOLD}Siamese Dream{RESET} by {CYAN}X{RESET}" in colored
-    assert f"({YELLOW}1993{RESET}, {GREEN}2 tracks{RESET})" in colored
+    assert colored.endswith(f"? {code}{tag}{RESET} [y/N] ")
+    assert f'Merge "{BOLD}Siamese Dream{RESET}" ({YELLOW}2011{RESET}) into "{BOLD}Siamese Dream{RESET}"' in colored
+    assert f"({YELLOW}1993{RESET})" in colored
     assert plex_style.strip(colored) == plain
 
 
@@ -1350,29 +1395,28 @@ def test_color_describe_album_pair_notes_and_paths():
     other = album_entry("A", 2, artist_key=6, year=2011, dirs=["E:\\B"])
     plain, colored = plain_and_colored(pm.describe_album_pair, target, other)
 
-    years_line = next(line for line in colored if "release years differ" in line)
-    assert years_line.startswith(f"  {RED}Note:{RESET}")
-    assert f"{YELLOW}1993{RESET} vs {YELLOW}2011{RESET}" in years_line
-    artist_line = next(line for line in colored if "different artist entries" in line)
-    assert artist_line.startswith(f"  {YELLOW}Note:{RESET}")
-    assert f"  {RED}Note:{RESET} these albums are in different folders" in colored
-    assert f"  Keep folder: {DIM}E:\\A{RESET}" in colored
-    assert [plex_style.strip(line) for line in colored] == plain
+    assert f"  {RED}Note:{RESET} release years differ ({YELLOW}1993{RESET} vs {YELLOW}2011{RESET})" in colored
+    assert f"  {YELLOW}Note:{RESET} these albums are under different artist entries" in colored
+    assert f"  Folders: {RED}these albums are in different folders{RESET}" in colored
+    assert f"{RED}2011{RESET} (differs)" in colored
+    assert f"{RED}1993" in colored
+    assert f"{DIM}E:\\A" in colored and f"{DIM}E:\\B" in colored
+    assert words(colored) == words(plain)
 
 
 def test_color_describe_album_pair_same_and_unknown_folders():
     plain, colored = plain_and_colored(
         pm.describe_album_pair, album_entry("A", 1, dirs=["E:\\A"]), album_entry("A", 2, dirs=["e:/a"])
     )
-    assert colored[-1] == f"  Folders: {GREEN}both albums are in the same folder{RESET}: {DIM}E:\\A{RESET}"
-    assert [plex_style.strip(line) for line in colored] == plain
+    assert colored.endswith(f"  Folders: {GREEN}both albums are in the same folder{RESET}\n")
+    assert words(colored) == words(plain)
 
     plain, colored = plain_and_colored(
         pm.describe_album_pair, album_entry("A", 1, dirs=["E:\\A"]), album_entry("A", 2, dirs=None)
     )
-    assert f"  {YELLOW}Note:{RESET} could not confirm whether these albums share a folder" in colored
-    assert colored[-1] == f"  Merge-in folder: {YELLOW}unknown (tracks could not be read){RESET}"
-    assert [plex_style.strip(line) for line in colored] == plain
+    assert f"  Folders: {YELLOW}could not confirm whether these albums share a folder{RESET}" in colored
+    assert f"{YELLOW}unknown (tracks could not be read)" in colored
+    assert words(colored) == words(plain)
 
 
 def test_color_folder_values_stay_raw():
@@ -1403,10 +1447,10 @@ def test_color_review_and_merge_artist(capsys):
 
     assert summary == plain_summary
     assert f"{GREEN}Merged.{RESET}" in out
-    assert f'"{CYAN}Ken Pomeroy{RESET}" - {GREEN}exact name match{RESET}' in out
+    assert f'Duplicate artist: "{CYAN}Ken Pomeroy{RESET}" - {GREEN}exact name match{RESET}' in out
     assert "\x1b" in prompts[0]
     assert [plex_style.strip(p) for p in prompts] == plain_prompts
-    assert plex_style.strip(out) == plain_out
+    assert words(out) == words(plain_out)
 
 
 def test_color_review_and_merge_album_header_and_failed_count(capsys):
@@ -1419,10 +1463,10 @@ def test_color_review_and_merge_album_header_and_failed_count(capsys):
     _, plain_prompts, plain_out = run_review(False, groups_fn, pm.ALBUM_MODE, ["y"], capsys)
     _, prompts, out = run_review(True, groups_fn, pm.ALBUM_MODE, ["y"], capsys)
 
-    assert f'"{BOLD}Low{RESET}" - {YELLOW}similar name match{RESET}' in out
+    assert f'Duplicate album: "{BOLD}Low{RESET}" by {CYAN}X{RESET} - {YELLOW}similar name match{RESET}' in out
     assert f"{RED}1{RESET} failed." in out
-    assert prompts[0].endswith(f"{GREEN}[same folder]{RESET} ")
-    assert plex_style.strip(out) == plain_out
+    assert prompts[0].endswith(f"{GREEN}[same folder]{RESET} [y/N] ")
+    assert words(out) == words(plain_out)
     assert [plex_style.strip(p) for p in prompts] == plain_prompts
 
 
@@ -1458,3 +1502,190 @@ def test_main_color_resolution(mocked_main, monkeypatch, capsys, extra, env, col
     out = capsys.readouterr().out
     assert ("\x1b[" in out) is colored
     assert "Dry run: " in plex_style.strip(out)
+    # Unicode borders only with color; ASCII borders otherwise.
+    assert ("\u256d" in out) is colored
+    assert ("+---" in out) is not colored
+
+
+# ---------------------------------------------------------------------------
+# Tables, headers and questions (display only)
+# ---------------------------------------------------------------------------
+
+def siamese_pair(target_year=1993, other_year=2011, target_dirs=..., other_dirs=..., other_artist=None):
+    target = album_entry(
+        "Siamese Dream", 100, artist="Smashing Pumpkins", artist_key=1, tracks=13, year=target_year,
+        dirs=["E:\\MP3\\Smashing Pumpkins\\1993 - Siamese Dream"] if target_dirs is ... else target_dirs,
+    )
+    other = album_entry(
+        "Siamese Dream", 200, artist=other_artist or "Smashing Pumpkins", artist_key=1, tracks=1,
+        year=other_year,
+        dirs=["E:\\MP3\\Smashing Pumpkins\\2011 - Siamese Dream"] if other_dirs is ... else other_dirs,
+    )
+    return target, other
+
+
+def test_album_pair_table_rows():
+    target, other = siamese_pair()
+    table = pm.album_pair_table(target, other)
+    assert [c.header for c in table.columns] == ["", "Keep", "Merge in"]
+    assert table_rows(table) == [
+        ("Title", "Siamese Dream", "Siamese Dream"),
+        ("Artist", "Smashing Pumpkins", "Smashing Pumpkins"),
+        ("Year", "1993", "2011 (differs)"),
+        ("Tracks", "13 tracks", "1 track"),
+        ("ratingKey", "100", "200"),
+        ("Folder", "E:\\MP3\\Smashing Pumpkins\\1993 - Siamese Dream", "E:\\MP3\\Smashing Pumpkins\\2011 - Siamese Dream"),
+    ]
+
+
+@pytest.mark.parametrize("year_a, year_b, expected", [
+    (1993, 2011, ("1993", "2011 (differs)")),
+    (1993, 1993, ("1993", "1993")),
+    (1993, None, ("1993", "unknown year")),
+    (None, None, ("unknown year", "unknown year")),
+])
+def test_album_pair_table_year_differs_marker(year_a, year_b, expected):
+    target, other = siamese_pair(year_a, year_b)
+    assert pair_rows(pm.album_pair_table(target, other))["Year"] == expected
+
+
+def test_album_pair_table_year_differs_is_red_else_yellow():
+    plex_style.enable()
+    rendered = plex_style.render(pm.album_pair_table(*siamese_pair()))
+    assert f"{RED}1993" in rendered and f"{RED}2011{RESET} (differs)" in rendered
+    rendered = plex_style.render(pm.album_pair_table(*siamese_pair(1993, 1993)))
+    assert f"{YELLOW}1993" in rendered and RED not in rendered
+
+
+def test_album_pair_table_differing_artist_and_title_are_highlighted():
+    plex_style.enable()
+    target, other = siamese_pair(other_artist="The Smashing Pumpkins")
+    other.title = "siamese dream"
+    rendered = plex_style.render(pm.album_pair_table(target, other))
+    assert f"{CYAN}Smashing Pumpkins" in rendered
+    assert f"{YELLOW}The Smashing Pumpkins" in rendered
+    assert f"{BOLD}Siamese Dream" in rendered
+    assert f"{YELLOW}siamese dream" in rendered
+    same = plex_style.render(pm.album_pair_table(*siamese_pair()))
+    assert f"{YELLOW}Smashing" not in same and f"{YELLOW}Siamese" not in same
+
+
+@pytest.mark.parametrize("dirs, cell", [
+    (None, "unknown (tracks could not be read)"),
+    ([], "unknown (no track files found)"),
+])
+def test_album_pair_table_unknown_folder_cells(dirs, cell):
+    target, other = siamese_pair(other_dirs=dirs)
+    assert pair_rows(pm.album_pair_table(target, other))["Folder"][1] == cell
+
+
+def test_album_pair_table_folder_cap_and_label():
+    dirs = [f"E:\\MP3\\D{i}" for i in range(7)]
+    target, other = siamese_pair(target_dirs=dirs)
+    rows = pair_rows(pm.album_pair_table(target, other))
+    assert "Folder" not in rows
+    assert rows["Folders"][0].splitlines()[-1] == "... and 2 more"
+    plex_style.enable()
+    assert f"\u2026 and {GREEN}2{RESET} more" in plex_style.render(pm.album_pair_table(target, other))
+
+
+def test_album_pair_table_long_folder_is_middle_truncated_to_width():
+    long_dir = "E:\\MP3\\Rock\\Alternative\\Smashing Pumpkins\\Studio Albums\\1993 - Siamese Dream"
+    target, other = siamese_pair(target_dirs=[long_dir])
+    plex_style.reset(width=80)
+    table = pm.album_pair_table(target, other)
+    keep = pair_rows(table)["Folder"][0]
+    assert keep == pm.shorten_path(long_dir, pm._path_width(80), "...")
+    assert keep.startswith("E:\\") and keep.endswith("\\1993 - Siamese Dream") and "\\...\\" in keep
+    assert len(keep) <= pm._path_width(80)
+    rendered = plex_style.render(plex_style.indent(table))
+    assert all(len(line) <= 80 for line in rendered.splitlines())
+    assert keep in rendered
+
+
+def test_album_pair_table_explicit_width():
+    long_dir = "E:\\MP3\\Rock\\Alternative\\Smashing Pumpkins\\Studio Albums\\1993 - Siamese Dream"
+    target, other = siamese_pair(target_dirs=[long_dir])
+    assert pair_rows(pm.album_pair_table(target, other, width=200))["Folder"][0] == long_dir
+
+
+@pytest.mark.parametrize("dirs_a, dirs_b, text, code", [
+    (["E:\\A"], ["e:/a"], "both albums are in the same folder", GREEN),
+    (["E:\\A\\CD1", "E:\\A\\CD2"], ["E:\\A\\CD1", "E:\\A\\CD2"], "both albums use the same 2 folders", GREEN),
+    (["E:\\A"], ["E:\\B"], "these albums are in different folders", RED),
+    (["E:\\A"], None, "could not confirm whether these albums share a folder", YELLOW),
+])
+def test_folder_status_line(dirs_a, dirs_b, text, code):
+    target, other = album_entry("A", 1, dirs=dirs_a), album_entry("A", 2, dirs=dirs_b)
+    assert pm.folder_status_line(target, other).plain == f"Folders: {text}"
+    plex_style.enable()
+    assert plex_style.render(pm.folder_status_line(target, other)) == f"Folders: {code}{text}{RESET}\n"
+
+
+def test_artist_pair_table_rows():
+    _, target, other = pomeroy_group()
+    table = pm.artist_pair_table(target, other)
+    assert [c.header for c in table.columns] == ["", "Keep", "Merge in"]
+    assert table_rows(table) == [
+        ("Name", "Ken Pomeroy", "Ken Pomeroy"),
+        ("Albums", "5 albums", "2 albums"),
+        ("ratingKey", "777239", "858664"),
+    ]
+
+
+def test_artist_pair_table_differing_name_is_highlighted():
+    plex_style.enable()
+    rendered = plex_style.render(pm.artist_pair_table(entry("Smashing Pumpkins", 1, 3), entry("Smashing Pumkins", 2, 1)))
+    assert f"{CYAN}Smashing Pumpkins" in rendered
+    assert f"{YELLOW}Smashing Pumkins" in rendered
+
+
+def test_artist_headers_exact_and_similar():
+    target = entry("Ken Pomeroy", 1, 5)
+    exact = pm.format_artist_header(1, 3, pm.CandidateGroup(target, [], "exact"))
+    similar = pm.format_artist_header(2, 3, pm.CandidateGroup(target, [], "similar"))
+    assert exact.plain == '[1/3] Duplicate artist: "Ken Pomeroy" - exact name match'
+    assert similar.plain == '[2/3] Duplicate artist: "Ken Pomeroy" - similar name match'
+
+
+def test_album_header():
+    target, _ = siamese_pair()
+    header = pm.format_album_header(1, 2, pm.CandidateGroup(target, [], "exact"))
+    assert header.plain == '[1/2] Duplicate album: "Siamese Dream" by Smashing Pumpkins'
+    assert pm.ALBUM_MODE.format_header is pm.format_album_header
+    assert pm.ARTIST_MODE.format_header is pm.format_artist_header
+
+
+def test_question_constants():
+    assert pm.ARTIST_QUESTION == 'Merge "{other}" ({other_albums}) into "{target}" ({target_albums})?'
+    assert pm.ALBUM_QUESTION == 'Merge "{other}" ({other_year}) into "{target}" ({target_year})? {folder_tag}'
+
+
+@pytest.mark.parametrize("color", [False, True])
+def test_bracket_titles_render_literally(color, capsys):
+    if color:
+        plex_style.enable()
+    target = album_entry("Gish [Deluxe]", 1, artist="[Live] Band", year=1991, dirs=["E:\\[x]"])
+    other = album_entry("Gish [Deluxe]", 2, artist="[Live] Band", year=1991, dirs=["E:\\[x]"])
+    group = pm.CandidateGroup(target, [other], "exact")
+    fake = scripted_input(["n"])
+
+    pm.review_and_merge([group], input_fn=fake, mode=pm.ALBUM_MODE)
+
+    out = plex_style.strip(capsys.readouterr().out)
+    assert '[1/1] Duplicate album: "Gish [Deluxe]" by [Live] Band' in out
+    assert "Gish [Deluxe]" in out.split("\n", 3)[3]  # in the table too
+    assert "[Live] Band" in out and "E:\\[x]" in out
+    assert plex_style.strip(fake.prompts[0]) == 'Merge "Gish [Deluxe]" (1991) into "Gish [Deluxe]" (1991)? [same folder] [y/N] '
+    assert target.title == "Gish [Deluxe]" and target.directories == ["E:\\[x]"]
+
+
+def test_review_prints_blank_line_and_header_before_each_group(capsys):
+    group1, _, _ = pomeroy_group()
+    group2 = pm.CandidateGroup(entry("Low", 1, 1), [entry("Low", 2, 1)], "exact")
+
+    pm.review_and_merge([group1, group2], input_fn=scripted_input(["n", "n"]))
+
+    out = capsys.readouterr().out
+    assert '\n\n[1/2] Duplicate artist: "Ken Pomeroy" - exact name match\n  +' in out
+    assert '\n\n[2/2] Duplicate artist: "Low" - exact name match\n  +' in out

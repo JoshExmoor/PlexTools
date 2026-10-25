@@ -20,7 +20,7 @@ A growing collection of command-line tools built on [python-plexapi](https://pyt
 
 - **`plex_sections.py`** — Picks the music library to use: the one named with `--section`, otherwise the server's only music library.
 - **`plex_common.py`** — Path, folder-comparison, yes/no prompt, and attribute helpers shared by the merge and split tools.
-- **`plex_style.py`** — Terminal colors for the merge and split tools' prompts. Turned off automatically when output isn't a terminal, when `NO_COLOR` is set, or with `--no-color`.
+- **`plex_style.py`** — Terminal colors and tables (via rich) for the merge and split tools. Turned off automatically when output isn't a terminal, when `NO_COLOR` is set, or with `--no-color`.
 
 
 ## Setup

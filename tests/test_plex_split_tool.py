@@ -1,3 +1,4 @@
+import re
 from datetime import datetime
 from unittest.mock import MagicMock
 
@@ -7,6 +8,22 @@ from plexapi.exceptions import NotFound, PlexApiException
 from plexapi.library import MusicSection
 
 import plex_split_tool as ps
+import plex_style as style
+
+
+def render_all(items):
+    """Renders describe_candidate() renderables the way review_and_split() prints them."""
+    return "".join(style.render(item) for item in items)
+
+
+def _plain(value):
+    return value.plain if hasattr(value, "plain") else str(value)
+
+
+def table_rows(table):
+    """Returns the table's rows as tuples of plain cell text."""
+    columns = [list(column.cells) for column in table.columns]
+    return [tuple(_plain(column[i]) for column in columns) for i in range(table.row_count)]
 
 # Never a real server: every main() test patches PlexServer and the credential lookup.
 FAKE_URL = "http://plex.invalid:32400"
@@ -342,25 +359,32 @@ def test_describe_and_prompt_text():
         ps.AlbumRoot("b", "E:\\SP\\Mellon Collie", 28, ["E:\\SP\\Mellon Collie\\CD1", "E:\\SP\\Mellon Collie\\CD2"]),
         ps.AlbumRoot("c", "E:\\SP\\Single", 1, ["E:\\SP\\Single"]),
     ], tracks=42)
-    assert ps.describe_candidate(candidate) == [
-        "  ratingKey 12345, 1993",
-        "  E:\\SP\\Siamese Dream (13 tracks)",
-        "  E:\\SP\\Mellon Collie (28 tracks in 2 disc folders)",
-        "  E:\\SP\\Single (1 track)",
+    items = ps.describe_candidate(candidate)
+    assert len(items) == 1
+    table = items[0].renderable
+    assert [c.header for c in table.columns] == ["Folder", "Tracks", "Disc folders"]
+    assert table_rows(table) == [
+        ("E:\\SP\\Siamese Dream", "13", ""),
+        ("E:\\SP\\Mellon Collie", "28", "2"),
+        ("E:\\SP\\Single", "1", ""),
     ]
-    assert ps.format_split_prompt(candidate) == (
-        "Would you like to split Siamese Dream by Smashing Pumpkins (42 tracks across 3 folders)? "
-    )
+    assert ps.format_split_prompt(candidate).plain == 'Split "Siamese Dream" (42 tracks across 3 folders)? [y/N] '
+    header = ps.format_candidate_header(1, 2, candidate)
+    assert header.plain == '[1/2] "Siamese Dream" by Smashing Pumpkins  (ratingKey 12345, 1993)'
 
 
 def test_describe_caps_roots_and_notes():
     roots = [ps.AlbumRoot(str(i), f"E:\\F{i}", 1, [f"E:\\F{i}"]) for i in range(ps.MAX_FOLDERS_SHOWN + 2)]
     candidate = candidate_with_roots(roots, year=None, pathless_tracks=2, load_error="boom")
-    lines = ps.describe_candidate(candidate)
-    assert lines[0] == "  ratingKey 12345, unknown year"
-    assert lines[ps.MAX_FOLDERS_SHOWN + 1] == "  ... and 2 more"
-    assert "  Note: 2 track(s) have no file path and were not checked." in lines
-    assert "  Note: could not load this album from Plex: boom" in lines
+    items = ps.describe_candidate(candidate)
+    rows = table_rows(items[0].renderable)
+    assert len(rows) == ps.MAX_FOLDERS_SHOWN + 1
+    assert rows[-1] == ("... and 2 more", "", "")
+    assert [_plain(item) for item in items[1:]] == [
+        "  Note: 2 track(s) have no file path and were not checked.",
+        "  Note: could not load this album from Plex: boom",
+    ]
+    assert "unknown year" in ps.format_candidate_header(1, 1, candidate).plain
 
 
 def test_prompt_single_track():
@@ -395,15 +419,16 @@ def test_queue_before_prompt_and_yes_splits(capsys):
     assert events == ["search", "input"]
     albums[100].split.assert_called_once_with()
     albums[200].split.assert_not_called()
-    assert fake.prompts == ["Would you like to split Siamese Dream by Smashing Pumpkins (4 tracks across 2 folders)? "]
+    assert fake.prompts == ['Split "Siamese Dream" (4 tracks across 2 folders)? [y/N] ']
     assert (summary.split, summary.unchanged, summary.skipped, summary.failed) == (1, 0, 0, 0)
     out = capsys.readouterr().out
     assert "Found 1 album(s) whose tracks span more than one album folder." in out
     assert f"Note: {ps.SPLIT_CAVEAT}" in out
-    assert '[1/1] "Siamese Dream" by Smashing Pumpkins' in out
+    assert '[1/1] "Siamese Dream" by Smashing Pumpkins  (ratingKey 100, ' in out
     assert "Split requested. Plex now lists these tracks under:" in out
-    assert '  ratingKey 100 "Siamese Dream" (2 tracks) [original]' in out
-    assert '  ratingKey 300 "Siamese Dream (Reissue)" (2 tracks)' in out
+    lines = out.splitlines()
+    assert any(line.startswith("  | 100 ") and "| Siamese Dream " in line and "| original |" in line for line in lines)
+    assert any(line.startswith("  | 300 ") and "| Siamese Dream (Reissue) |" in line for line in lines)
     assert "Summary: 1 split, 0 unchanged, 0 skipped, 0 failed." in out
 
 
@@ -429,9 +454,13 @@ def test_dry_run_never_prompts_or_splits(capsys, args):
     section.fetchItems.assert_not_called()
     assert (summary.split, summary.skipped, summary.failed) == (0, 0, 0)
     out = capsys.readouterr().out
-    assert "  E:\\MP3\\Smashing Pumpkins\\Siamese Dream (2 tracks)" in out
+    assert any(
+        line.startswith("  | E:\\MP3\\Smashing Pumpkins\\Siamese Dream ") and "|      2 |" in line
+        for line in out.splitlines()
+    )
     assert "Dry run: 1 album(s) would be offered for splitting. Nothing was changed. Use --apply to split." in out
     assert ps.SPLIT_CAVEAT not in out
+    assert "[y/N]" not in out
 
 
 def two_candidates():
@@ -464,7 +493,7 @@ def test_load_failure_listed_and_counted_failed(capsys):
 
     summary = ps.run_split_tool(make_plex(section), apply=True, input_fn=fake)
 
-    assert len(fake.prompts) == 1 and "split B by Art" in fake.prompts[0]
+    assert len(fake.prompts) == 1 and fake.prompts[0].startswith('Split "B"')
     captured = capsys.readouterr()
     assert "Note: could not load this album from Plex: down" in captured.out
     assert "Cannot split: album could not be loaded." in captured.out
@@ -686,11 +715,24 @@ CYAN, BOLD, YELLOW, GREEN, DIM, RED, RESET = (
 )
 
 
+_BORDERS = re.compile(r"[\s|+\-\u2500-\u257f]+")
+
+
+def words(text):
+    """Text without color codes or table borders (ASCII or Unicode), for comparing color on/off output."""
+    return _BORDERS.sub(" ", plex_style.strip(text)).split()
+
+
+def _render_value(value):
+    return render_all(value) if isinstance(value, list) else plex_style.prompt_str(value)
+
+
 def plain_and_colored(fn, *args):
+    """Returns (fn(*args) rendered with color off, fn(*args) rendered with color on)."""
     plex_style.reset()
-    plain = fn(*args)
+    plain = _render_value(fn(*args))
     plex_style.enable()
-    return plain, fn(*args)
+    return plain, _render_value(fn(*args))
 
 
 def sample_candidate(**kwargs):
@@ -702,20 +744,30 @@ def sample_candidate(**kwargs):
 
 def test_color_split_prompt():
     plain, colored = plain_and_colored(ps.format_split_prompt, sample_candidate())
-    assert plain == "Would you like to split Siamese Dream by Smashing Pumpkins (26 tracks across 2 folders)? "
-    assert f"{BOLD}Siamese Dream{RESET} by {CYAN}Smashing Pumpkins{RESET}" in colored
+    assert plain == 'Split "Siamese Dream" (26 tracks across 2 folders)? [y/N] '
+    assert f'Split "{BOLD}Siamese Dream{RESET}"' in colored
     assert f"({GREEN}26 tracks{RESET} across {GREEN}2 folders{RESET})? " in colored
-    assert colored.endswith(f"{RESET})? ")
+    assert colored.endswith(f"{RESET})? [y/N] ")
     assert plex_style.strip(colored) == plain
 
 
 def test_color_describe_candidate():
     plain, colored = plain_and_colored(ps.describe_candidate, sample_candidate(pathless_tracks=2, load_error="boom"))
-    assert colored[0] == f"  ratingKey {DIM}12345{RESET}, {YELLOW}1993{RESET}"
-    assert colored[2] == f"  {DIM}E:\\SP\\Mellon{RESET} ({GREEN}13 tracks{RESET} in {GREEN}2 disc folders{RESET})"
-    assert any(line.startswith(f"  {YELLOW}Note:{RESET} {GREEN}2{RESET} track(s)") for line in colored)
+    assert f"{DIM}E:\\SP\\Mellon" in colored
+    assert re.search(r"\x1b\[32m *13\x1b\[0m", colored)  # right-justified inside the style
+    assert "\u256d" in colored and "\u256d" not in plain
+    assert f"  {YELLOW}Note:{RESET} {GREEN}2{RESET} track(s)" in colored
     assert f"  {RED}Note:{RESET} could not load this album from Plex: boom" in colored
-    assert [plex_style.strip(line) for line in colored] == plain
+    assert words(colored) == words(plain)
+
+
+def test_color_candidate_header():
+    plain, colored = plain_and_colored(ps.format_candidate_header, 1, 2, sample_candidate())
+    assert plain == '[1/2] "Siamese Dream" by Smashing Pumpkins  (ratingKey 12345, 1993)'
+    assert colored == (
+        f'[1/2] "{BOLD}Siamese Dream{RESET}" by {CYAN}Smashing Pumpkins{RESET}  '
+        f"(ratingKey {DIM}12345{RESET}, {YELLOW}1993{RESET})"
+    )
 
 
 def test_color_root_display_stays_raw():
@@ -746,13 +798,14 @@ def test_color_report_split(capsys, after, keys, expected):
 
     assert result == plain_result
     assert expected in colored
-    assert plex_style.strip(colored) == plain
+    assert words(colored) == words(plain)
 
 
 def test_color_report_split_original_tag_and_missing_note(capsys):
     section_fn = lambda: make_section([], after_split={1: (100, "T"), 2: (200, "T2")})  # noqa: E731
     _, colored = report_out(capsys, True, section_fn, [1, 2, 3])
-    assert f'  ratingKey {DIM}100{RESET} "{BOLD}T{RESET}" ({GREEN}1 track{RESET}) {DIM}[original]{RESET}' in colored
+    row = next(line for line in colored.splitlines() if f"{DIM}100" in line)
+    assert f"{BOLD}T" in row and re.search(r"\x1b\[32m *1\x1b\[0m", row) and f"{DIM}original" in row
     assert f"  {YELLOW}Note:{RESET} {GREEN}1{RESET} track(s) could not be found after the split." in colored
 
 
@@ -779,7 +832,7 @@ def test_color_review_and_split(capsys):
     assert f"Summary: {GREEN}1{RESET} split" in out
     assert "\x1b" in prompts[0]
     assert [plex_style.strip(p) for p in prompts] == plain_prompts
-    assert plex_style.strip(out) == plain_out
+    assert words(out) == words(plain_out)
 
 
 def test_color_summary_unchanged_count_is_yellow(capsys):
@@ -841,3 +894,79 @@ def test_main_color_resolution(mocked_main, monkeypatch, capsys, extra, env, col
     out = capsys.readouterr().out
     assert ("\x1b[" in out) is colored
     assert "Dry run: 1 album(s)" in plex_style.strip(out)
+    # Unicode borders only with color; ASCII borders otherwise.
+    assert ("\u256d" in out) is colored
+    assert ("+---" in out) is not colored
+
+
+# ---------------------------------------------------------------------------
+# Tables and questions (display only)
+# ---------------------------------------------------------------------------
+
+LONG_ROOT = "E:\\MP3\\Rock\\Alternative\\Smashing Pumpkins\\Studio Albums\\Deluxe Editions\\1993 - Siamese Dream"
+
+
+def test_candidate_table_long_path_is_middle_truncated_to_width():
+    candidate = candidate_with_roots([
+        ps.AlbumRoot("a", LONG_ROOT, 13, [LONG_ROOT]),
+        ps.AlbumRoot("b", "E:\\MP3\\Mellon", 28, ["E:\\MP3\\Mellon\\CD1", "E:\\MP3\\Mellon\\CD2"]),
+    ])
+    plex_style.reset(width=60)
+    table = ps.candidate_table(candidate)
+    rows = table_rows(table)
+    folder_width = ps._folder_width(60)
+    assert rows[0] == (ps.shorten_path(LONG_ROOT, folder_width, "..."), "13", "")
+    assert rows[0][0].startswith("E:\\") and rows[0][0].endswith("\\1993 - Siamese Dream") and "\\...\\" in rows[0][0]
+    assert len(rows[0][0]) <= folder_width
+    assert rows[1] == ("E:\\MP3\\Mellon", "28", "2")
+    rendered = plex_style.render(plex_style.indent(table))
+    assert all(len(line) <= 60 for line in rendered.splitlines())
+    assert candidate.roots[0].display == LONG_ROOT  # display data is never changed
+
+
+def test_candidate_table_explicit_width_and_right_justified_counts():
+    candidate = candidate_with_roots([ps.AlbumRoot("a", LONG_ROOT, 13, [LONG_ROOT])])
+    table = ps.candidate_table(candidate, width=200)
+    assert table_rows(table)[0][0] == LONG_ROOT
+    assert [c.justify for c in table.columns] == ["left", "right", "right"]
+
+
+def test_split_report_table_rows():
+    table = ps.split_report_table([(100, "Siamese Dream", 2), (300, "Siamese Dream (Reissue)", 2)], 100)
+    assert [c.header for c in table.columns] == ["ratingKey", "Title", "Tracks", "Note"]
+    assert table_rows(table) == [
+        ("100", "Siamese Dream", "2", "original"),
+        ("300", "Siamese Dream (Reissue)", "2", ""),
+    ]
+
+
+def test_report_split_prints_table_in_original_first_order(capsys):
+    section = make_section([], after_split={1: (300, "B"), 2: (100, "T"), 3: (200, "C")})
+    assert ps.report_split(section, report_candidate([1, 2, 3])) == "split"
+    out = capsys.readouterr().out
+    keys = [line.split("|")[1].strip() for line in out.splitlines() if line.startswith("  | ") and "ratingKey" not in line]
+    assert keys == ["100", "200", "300"]
+    assert "| original |" in out
+
+
+def test_split_question_constant():
+    assert ps.SPLIT_QUESTION == 'Split "{title}" ({tracks} across {folders})?'
+
+
+@pytest.mark.parametrize("color", [False, True])
+def test_bracket_titles_render_literally(color, capsys):
+    if color:
+        plex_style.enable()
+    candidate = ps.SplitCandidate(
+        rating_key=7, title="Gish [Deluxe]", artist="[Live] Band", year=1991, track_count=2,
+        roots=[ps.AlbumRoot("a", "E:\\[x]", 1, ["E:\\[x]"]), ps.AlbumRoot("b", "E:\\[y]", 1, ["E:\\[y]"])],
+        obj=MagicMock(),
+    )
+    fake = scripted_input(["n"])
+
+    ps.review_and_split([candidate], input_fn=fake, apply=True)
+
+    out = plex_style.strip(capsys.readouterr().out)
+    assert '[1/1] "Gish [Deluxe]" by [Live] Band  (ratingKey 7, 1991)' in out
+    assert "E:\\[x]" in out and "E:\\[y]" in out
+    assert plex_style.strip(fake.prompts[0]) == 'Split "Gish [Deluxe]" (2 tracks across 2 folders)? [y/N] '

@@ -12,9 +12,8 @@ import plex_style  # noqa: E402
 
 @pytest.fixture(autouse=True)
 def _plain_output(monkeypatch):
-    """Keeps color off around every test so a main() run can't leak it into the next test."""
-    monkeypatch.setattr(plex_style, "_console_fixed", False)
-    monkeypatch.setattr(plex_style, "_console_method", "")
-    plex_style.reset()
+    """Keeps color off (and a fixed 120-column width) around every test so a main() run can't leak it."""
+    monkeypatch.setattr(plex_style, "_vt_state", "")
+    plex_style.reset(width=120)
     yield
-    plex_style.reset()
+    plex_style.reset(width=120)

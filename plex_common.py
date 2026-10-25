@@ -85,17 +85,88 @@ def same_folders(a, b) -> bool:
     return {folder_key(d) for d in a} == {folder_key(d) for d in b}
 
 
-def ask_yes_no(prompt: str, input_fn=None) -> bool:
-    """Asks `prompt` until the answer is yes or no; Enter alone means no.
+def shorten_path(path: str, max_width: int, ellipsis: str = "\u2026") -> str:
+    """Returns `path` cut to at most `max_width` characters by replacing middle folders with `ellipsis`.
 
-    `input_fn` defaults to the built-in input(), looked up at call time.
-    EOFError and KeyboardInterrupt propagate to the caller.
+    The anchor (drive letter, UNC share or POSIX root) and the last folder
+    are kept; then whole folders are added back alternately from the left
+    (root side) and from the right (parent folders) while they fit, so the
+    result is cut at separators, e.g. "E:\\MP3\\…\\Siamese Dream". When even
+    that does not fit (or the path has a single component) the characters in
+    the middle are cut, keeping more of the end. Widths are counted with
+    len(), so wide (e.g. CJK) characters may still overflow; tables fold such
+    values instead of hiding them.
+    """
+    if max_width <= 0:
+        return ""
+    if len(path) <= max_width:
+        return path
+
+    if is_windows_path(path):
+        sep = "\\" if "\\" in path else "/"
+        drive, rest = ntpath.splitdrive(path)
+        anchor = drive + (sep if rest[:1] in ("\\", "/") else "")
+        parts = [p for p in re.split(r"[\\/]+", rest) if p]
+    else:
+        sep = "/"
+        anchor = "/" if path.startswith("/") else ""
+        parts = [p for p in re.split(r"/+", path) if p]
+
+    def build(head, tail):
+        return anchor + "".join(c + sep for c in head) + ellipsis + sep + sep.join(tail)
+
+    if len(parts) >= 2 and len(build([], parts[-1:])) <= max_width:
+        left, right = 0, len(parts) - 1  # next head index; tail starts at `right`
+        head, tail = [], [parts[-1]]
+        grow_head = grow_tail = True
+        while grow_head or grow_tail:
+            if left >= right - 1:
+                break  # only the cut-out part is left
+            if grow_head:
+                if len(build(head + [parts[left]], tail)) <= max_width:
+                    head.append(parts[left])
+                    left += 1
+                else:
+                    grow_head = False
+            if left >= right - 1:
+                break
+            if grow_tail:
+                if len(build(head, [parts[right - 1]] + tail)) <= max_width:
+                    tail.insert(0, parts[right - 1])
+                    right -= 1
+                else:
+                    grow_tail = False
+        return build(head, tail)
+
+    keep = max_width - len(ellipsis)
+    if keep <= 0:
+        return ellipsis[:max_width]
+    left = keep // 3
+    right = keep - left
+    return path[:left] + ellipsis + path[len(path) - right:]
+
+
+# Answer hint at the end of every yes/no question (Enter means no).
+YES_NO_HINT = "[y/N]"
+
+
+def question(template: str, **values) -> "style.Text":
+    """Returns a yes/no question: the filled template (see plex_style.fill) then " [y/N] "."""
+    return style.line(style.fill(template, **values), f" {YES_NO_HINT} ")
+
+
+def ask_yes_no(prompt, input_fn=None) -> bool:
+    """Asks `prompt` (a str or a rich Text) until the answer is yes or no; Enter alone means no.
+
+    `input_fn` defaults to the built-in input(), looked up at call time, and
+    always receives a str (see plex_style.prompt_str). EOFError and
+    KeyboardInterrupt propagate to the caller.
     """
     input_fn = input_fn or input
     while True:
-        answer = input_fn(style.input_prompt(prompt)).strip().lower()
+        answer = input_fn(style.prompt_str(prompt)).strip().lower()
         if answer in ("y", "yes"):
             return True
         if answer in ("", "n", "no"):
             return False
-        print(style.warn("Please answer y or n."))
+        style.say(style.warn("Please answer y or n."))
